@@ -1,8 +1,8 @@
-var files = require('../fs/files.js');
+var files = require('../fs/files');
 var selftest = require('../tool-testing/selftest.js');
 var testUtils = require('../tool-testing/test-utils.js');
 var Sandbox = selftest.Sandbox;
-import { host } from "../utils/archinfo.js";
+import { host } from "../utils/archinfo";
 const relBuildDir = "../build";
 const isOSX = host().split(".", 2).join(".") === "os.osx";
 
@@ -80,12 +80,5 @@ selftest.define("cordova builds with server options", ["cordova"], function () {
   run.waitSecs(90);
   run.expectExit(0);
   checkMobileServer(s, "https://example.com/");
-  cleanUpBuild(s);
-
-  // XXX COMPAT WITH 0.9.2.2
-  run = s.run("build", relBuildDir, "--mobile-port", "example.com:5000");
-  run.waitSecs(90);
-  run.expectExit(0);
-  checkMobileServer(s, "http://example.com:5000/");
   cleanUpBuild(s);
 });

@@ -78,10 +78,6 @@ const CARRIAGE_RETURN = process.platform === 'win32' &&
 const FORCE_PRETTY = process.env.METEOR_PRETTY_OUTPUT &&
   process.env.METEOR_PRETTY_OUTPUT != '0';
 
-if (! process.env.METEOR_COLOR) {
-  chalk.enabled = false;
-}
-
 const STATUS_MAX_LENGTH = 40;
 
 const PROGRESS_MAX_WIDTH = 40;
@@ -336,7 +332,7 @@ class ProgressDisplayFull {
       this._progressBarRenderer.start = startTime;
     }
 
-    if (!this._renderTimeout && this._lastWrittenTime) {
+    if (!this._rerenderTimeout && this._lastWrittenTime) {
       this._rerenderTimeout = setTimeout(() => {
         this._rerenderTimeout = null;
         this._render()
@@ -509,7 +505,7 @@ class StatusPoller {
 
     this._watching = watching;
 
-    var title = (watching != null ? watching._title : null) || FALLBACK_STATUS;
+    var title = (watching != null ? watching.title : null) || FALLBACK_STATUS;
 
     var progressDisplay = this._console._progressDisplay;
     progressDisplay.updateStatus && progressDisplay.updateStatus(title);
@@ -583,6 +579,7 @@ class Console extends ConsoleBase {
     this._throttledYield = new ThrottledYield();
 
     this.verbose = false;
+    this._simpleDebug = false;
 
     // Legacy helpers
     this.stdout = Object.create(null);
@@ -595,11 +592,16 @@ class Console extends ConsoleBase {
 
     this._logThreshold = LEVEL_CODE_INFO;
     var logspec = process.env.METEOR_LOG;
+
     if (logspec) {
       logspec = logspec.trim().toLowerCase();
-      if (logspec == 'debug') {
+      if (logspec === 'debug') {
         this._logThreshold = LEVEL_CODE_DEBUG;
       }
+    }
+
+    if (process.env.METEOR_SIMPLE_DEBUG) {
+      this._simpleDebug = true;
     }
 
     cleanupOnExit((sig) => {
@@ -766,6 +768,17 @@ class Console extends ConsoleBase {
 
     var message = this._format(args);
     this._print(LEVEL_DEBUG, message);
+  }
+
+  // Don't use console and so it does not affect tests.
+  // like this.fullBuffer from matcher.
+  simpleDebug(...args) {
+    if (! this._simpleDebug) {
+      return;
+    }
+
+    var message = this._format(args);
+    process.stdout.write( '\n' + message + '\n');
   }
 
   // By default, Console.debug automatically line wraps the output.
@@ -1069,7 +1082,7 @@ class Console extends ConsoleBase {
   //        level with Console.LEVEL_INFO, Console.LEVEL_ERROR, etc.
   //      - ignoreWidth: ignore the width of the terminal, and go over the
   //        character limit instead of trailing off with '...'. Useful for
-  //        printing directories, for examle.
+  //        printing directories, for example.
   //      - indent: indent the entire table by a given number of spaces.
   printTwoColumns(rows, options) {
     options = options || Object.create(null);

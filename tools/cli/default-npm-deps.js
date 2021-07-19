@@ -4,7 +4,7 @@ import {
   statOrNull,
   writeFile,
   unlink,
-} from "../fs/files.js";
+} from "../fs/files";
 
 const INSTALL_JOB_MESSAGE = "installing npm dependencies";
 
@@ -13,7 +13,8 @@ export function install(appDir, options) {
   const needTempPackageJson = ! statOrNull(packageJsonPath);
 
   if (needTempPackageJson) {
-    const { dependencies } = require("../static-assets/skel/package.json");
+    // NOTE we need skel-minimal to pull in jQuery which right now is required for Blaze
+    const { dependencies } = require("../static-assets/skel-blaze/package.json");
 
     // Write a minimial package.json with the same dependencies as the
     // default new-app package.json file.

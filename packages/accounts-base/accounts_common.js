@@ -77,13 +77,46 @@ export class AccountsCommon {
     throw new Error("userId method not implemented");
   }
 
+  // merge the defaultFieldSelector with an existing options object
+  _addDefaultFieldSelector(options = {}) {
+    // this will be the most common case for most people, so make it quick
+    if (!this._options.defaultFieldSelector) return options;
+
+    // if no field selector then just use defaultFieldSelector
+    if (!options.fields) return {
+      ...options,
+      fields: this._options.defaultFieldSelector,
+    };
+
+    // if empty field selector then the full user object is explicitly requested, so obey
+    const keys = Object.keys(options.fields);
+    if (!keys.length) return options;
+
+    // if the requested fields are +ve then ignore defaultFieldSelector
+    // assume they are all either +ve or -ve because Mongo doesn't like mixed
+    if (!!options.fields[keys[0]]) return options;
+
+    // The requested fields are -ve.
+    // If the defaultFieldSelector is +ve then use requested fields, otherwise merge them
+    const keys2 = Object.keys(this._options.defaultFieldSelector);
+    return this._options.defaultFieldSelector[keys2[0]] ? options : {
+      ...options,
+      fields: {
+        ...options.fields,
+        ...this._options.defaultFieldSelector,
+      }
+    }
+  }
+
   /**
    * @summary Get the current user record, or `null` if no user is logged in. A reactive data source.
    * @locus Anywhere
+   * @param {Object} [options]
+   * @param {MongoFieldSpecifier} options.fields Dictionary of fields to return or exclude.
    */
-  user() {
+  user(options) {
     const userId = this.userId();
-    return userId ? this.users.findOne(userId) : null;
+    return userId ? this.users.findOne(userId, this._addDefaultFieldSelector(options)) : null;
   }
 
   // Set up config for the accounts system. Call this on both the client
@@ -128,10 +161,14 @@ export class AccountsCommon {
    * @param {Boolean} options.forbidClientAccountCreation Calls to [`createUser`](#accounts_createuser) from the client will be rejected. In addition, if you are using [accounts-ui](#accountsui), the "Create account" link will not be available.
    * @param {String | Function} options.restrictCreationByEmailDomain If set to a string, only allows new users if the domain part of their email address matches the string. If set to a function, only allows new users if the function returns true.  The function is passed the full email address of the proposed new user.  Works with password-based sign-in and external services that expose email addresses (Google, Facebook, GitHub). All existing users still can log in after enabling this option. Example: `Accounts.config({ restrictCreationByEmailDomain: 'school.edu' })`.
    * @param {Number} options.loginExpirationInDays The number of days from when a user logs in until their token expires and they are logged out. Defaults to 90. Set to `null` to disable login expiration.
-   * @param {String} options.oauthSecretKey When using the `oauth-encryption` package, the 16 byte key using to encrypt sensitive account credentials in the database, encoded in base64.  This option may only be specifed on the server.  See packages/oauth-encryption/README.md for details.
+   * @param {Number} options.loginExpiration The number of milliseconds from when a user logs in until their token expires and they are logged out, for a more granular control. If `loginExpirationInDays` is set, it takes precedent.
+   * @param {String} options.oauthSecretKey When using the `oauth-encryption` package, the 16 byte key using to encrypt sensitive account credentials in the database, encoded in base64.  This option may only be specified on the server.  See packages/oauth-encryption/README.md for details.
    * @param {Number} options.passwordResetTokenExpirationInDays The number of days from when a link to reset password is sent until token expires and user can't reset password with the link anymore. Defaults to 3.
-   * @param {Number} options.passwordEnrollTokenExpirationInDays The number of days from when a link to set inital password is sent until token expires and user can't set password with the link anymore. Defaults to 30.
+   * @param {Number} options.passwordResetTokenExpiration The number of milliseconds from when a link to reset password is sent until token expires and user can't reset password with the link anymore. If `passwordResetTokenExpirationInDays` is set, it takes precedent.
+   * @param {Number} options.passwordEnrollTokenExpirationInDays The number of days from when a link to set initial password is sent until token expires and user can't set password with the link anymore. Defaults to 30.
+   * @param {Number} options.passwordEnrollTokenExpiration The number of milliseconds from when a link to set initial password is sent until token expires and user can't set password with the link anymore. If `passwordEnrollTokenExpirationInDays` is set, it takes precedent.
    * @param {Boolean} options.ambiguousErrorMessages Return ambiguous error messages from login failures to prevent user enumeration. Defaults to false.
+   * @param {MongoFieldSpecifier} options.defaultFieldSelector To exclude by default large custom fields from `Meteor.user()` and `Meteor.findUserBy...()` functions when called without a field selector, and all `onLogin`, `onLoginFailure` and `onLogout` callbacks.  Example: `Accounts.config({ defaultFieldSelector: { myBigArray: 0 }})`. Beware when using this. If, for instance, you do not include `email` when excluding the fields, you can have problems with functions like `forgotPassword` that will break because they won't have the required data available. It's recommend that you always keep the fields `_id`, `username`, and `email`.
    */
   config(options) {
     // We don't want users to accidentally only call Accounts.config on the
@@ -164,9 +201,11 @@ export class AccountsCommon {
     }
 
     // validate option keys
-    const VALID_KEYS = ["sendVerificationEmail", "forbidClientAccountCreation", "passwordEnrollTokenExpirationInDays",
-                      "restrictCreationByEmailDomain", "loginExpirationInDays", "passwordResetTokenExpirationInDays",
-                      "ambiguousErrorMessages", "bcryptRounds"];
+    const VALID_KEYS = ["sendVerificationEmail", "forbidClientAccountCreation", "passwordEnrollTokenExpiration",
+                      "passwordEnrollTokenExpirationInDays", "restrictCreationByEmailDomain", "loginExpirationInDays",
+                      "loginExpiration", "passwordResetTokenExpirationInDays", "passwordResetTokenExpiration",
+                      "ambiguousErrorMessages", "bcryptRounds", "defaultFieldSelector"];
+
     Object.keys(options).forEach(key => {
       if (!VALID_KEYS.includes(key)) {
         throw new Error(`Accounts.config: Invalid key: ${key}`);
@@ -196,7 +235,10 @@ export class AccountsCommon {
    *                        as user details, connection information, etc.
    */
   onLogin(func) {
-    return this._onLoginHook.register(func);
+    let ret = this._onLoginHook.register(func);
+    // call the just registered callback if already logged in
+    this._startupCallback(ret.callback);
+    return ret;
   }
 
   /**
@@ -257,18 +299,18 @@ export class AccountsCommon {
       (this._options.loginExpirationInDays === null)
         ? LOGIN_UNEXPIRING_TOKEN_DAYS
         : this._options.loginExpirationInDays;
-    return (loginExpirationInDays
-        || DEFAULT_LOGIN_EXPIRATION_DAYS) * 24 * 60 * 60 * 1000;
+    return this._options.loginExpiration || (loginExpirationInDays
+        || DEFAULT_LOGIN_EXPIRATION_DAYS) * 86400000;
   }
 
   _getPasswordResetTokenLifetimeMs() {
-    return (this._options.passwordResetTokenExpirationInDays ||
-            DEFAULT_PASSWORD_RESET_TOKEN_EXPIRATION_DAYS) * 24 * 60 * 60 * 1000;
+    return this._options.passwordResetTokenExpiration || (this._options.passwordResetTokenExpirationInDays ||
+            DEFAULT_PASSWORD_RESET_TOKEN_EXPIRATION_DAYS) * 86400000;
   }
 
   _getPasswordEnrollTokenLifetimeMs() {
-    return (this._options.passwordEnrollTokenExpirationInDays ||
-        DEFAULT_PASSWORD_ENROLL_TOKEN_EXPIRATION_DAYS) * 24 * 60 * 60 * 1000;
+    return this._options.passwordEnrollTokenExpiration || (this._options.passwordEnrollTokenExpirationInDays ||
+        DEFAULT_PASSWORD_ENROLL_TOKEN_EXPIRATION_DAYS) * 86400000;
   }
 
   _tokenExpiration(when) {
@@ -285,6 +327,9 @@ export class AccountsCommon {
     }
     return new Date() > (new Date(when) - minLifetimeMs);
   }
+
+  // No-op on the server, overridden on the client.
+  _startupCallback(callback) {}
 }
 
 // Note that Accounts is defined separately in accounts_client.js and
@@ -301,8 +346,10 @@ Meteor.userId = () => Accounts.userId();
  * @summary Get the current user record, or `null` if no user is logged in. A reactive data source.
  * @locus Anywhere but publish functions
  * @importFromPackage meteor
+ * @param {Object} [options]
+ * @param {MongoFieldSpecifier} options.fields Dictionary of fields to return or exclude.
  */
-Meteor.user = () => Accounts.user();
+Meteor.user = (options) => Accounts.user(options);
 
 // how long (in days) until a login token expires
 const DEFAULT_LOGIN_EXPIRATION_DAYS = 90;

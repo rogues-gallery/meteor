@@ -1,32 +1,94 @@
+
 var assert = require("assert");
 var _ = require('underscore');
 
-var archinfo = require('./utils/archinfo.js');
+var archinfo = require('./utils/archinfo');
 var buildmessage = require('./utils/buildmessage.js');
 var catalog = require('./packaging/catalog/catalog.js');
 var catalogLocal = require('./packaging/catalog/catalog-local.js');
 var Console = require('./console/console.js').Console;
-var files = require('./fs/files.js');
+var files = require('./fs/files');
 var isopackCacheModule = require('./isobuild/isopack-cache.js');
 import { loadIsopackage } from './tool-env/isopackets.js';
 var packageMapModule = require('./packaging/package-map.js');
 var release = require('./packaging/release.js');
 var tropohouse = require('./packaging/tropohouse.js');
 var utils = require('./utils/utils.js');
-var watch = require('./fs/watch.js');
-var Profile = require('./tool-env/profile.js').Profile;
-import { KNOWN_ISOBUILD_FEATURE_PACKAGES } from './isobuild/compiler.js';
+var watch = require('./fs/watch');
+var Profile = require('./tool-env/profile').Profile;
+
+// This variable was duplicated due to an issue on importing it.
+// The issue only happens on node 14, and is most surely related to this: https://nodejs.org/en/blog/release/v14.0.0/
+// !!! When changing this, also change on tools/packaging/catalog/catalog-local.js !!!
+const KNOWN_ISOBUILD_FEATURE_PACKAGES = {
+  // This package directly calls Plugin.registerCompiler. Package authors
+  // must explicitly depend on this feature package to use the API.
+  'isobuild:compiler-plugin': ['1.0.0'],
+
+  // This package directly calls Plugin.registerMinifier. Package authors
+  // must explicitly depend on this feature package to use the API.
+  'isobuild:minifier-plugin': ['1.0.0'],
+
+  // This package directly calls Plugin.registerLinter. Package authors
+  // must explicitly depend on this feature package to use the API.
+  'isobuild:linter-plugin': ['1.0.0'],
+
+  // This package is only published in the isopack-2 format, not isopack-1 or
+  // older. ie, it contains "source" files for compiler plugins, not just
+  // JS/CSS/static assets/head/body.
+  // This is implicitly added at publish time to any such package; package
+  // authors don't have to add it explicitly. It isn't relevant for local
+  // packages, which can be rebuilt if possible by the older tool.
+  //
+  // Specifically, this is to avoid the case where a package is published with a
+  // dependency like `api.use('less@1.0.0 || 2.0.0')` and the publication
+  // selects the newer compiler plugin version to generate the isopack. The
+  // published package (if this feature package wasn't implicitly included)
+  // could still be selected by the Version Solver to be used with an old
+  // Isobuild... just because less@2.0.0 depends on isobuild:compiler-plugin
+  // doesn't mean it couldn't choose less@1.0.0, which is not actually
+  // compatible with this published package.  (Constraints of the form described
+  // above are not very helpful, but at least we can prevent old Isobuilds from
+  // choking on confusing packages.)
+  //
+  // (Why not isobuild:isopack@2.0.0? Well, that would imply that Version Solver
+  // would have to choose only one isobuild:isopack feature version, which
+  // doesn't make sense here.)
+  'isobuild:isopack-2': ['1.0.0'],
+
+  // This package uses the `prodOnly` metadata flag, which causes it to
+  // automatically depend on the `isobuild:prod-only` feature package.
+  'isobuild:prod-only': ['1.0.0'],
+
+  // This package depends on a specific version of Cordova. Package authors must
+  // explicitly depend on this feature package to indicate that they are not
+  // compatible with earlier Cordova versions, which is most likely a result of
+  // the Cordova plugins they depend on.
+  // One scenario is a package depending on a Cordova plugin or version
+  // that is only available on npm, which means downloading the plugin is not
+  // supported on versions of Cordova below 5.0.0.
+  'isobuild:cordova': ['5.4.0'],
+
+  // This package requires functionality introduced in meteor-tool@1.5.0
+  // to enable dynamic module fetching via import(...).
+  'isobuild:dynamic-import': ['1.5.0'],
+
+  // This package ensures that processFilesFor{Bundle,Target,Package} are
+  // allowed to return a Promise instead of having to await async
+  // compilation using fibers and/or futures.
+  'isobuild:async-plugins': ['1.6.1'],
+}
 
 import {
   optimisticReadJsonOrNull,
   optimisticHashOrNull,
-} from "./fs/optimistic.js";
+} from "./fs/optimistic";
 
 import {
   mapWhereToArches,
-} from "./isobuild/package-api.js";
+} from "./utils/archinfo";
 
-import Resolver from "./isobuild/resolver.js";
+import Resolver from "./isobuild/resolver";
 
 const CAN_DELAY_LEGACY_BUILD = ! JSON.parse(
   process.env.METEOR_DISALLOW_DELAYED_LEGACY_BUILD || "false"
@@ -622,6 +684,27 @@ _.extend(ProjectContext.prototype, {
         "resolver-result-cache.json"
       ),
       JSON.stringify(this._resolverResultCache) + "\n"
+    );
+  },
+
+  getBuildCache() {
+    try {
+      return JSON.parse(files.readFile(files.pathJoin(
+        this.projectLocalDir,
+        "build-cache.json"
+      )));
+    } catch (e) {
+      return null;
+    }
+  },
+
+  saveBuildCache(buildCache) {
+    files.writeFileAtomically(
+      files.pathJoin(
+        this.projectLocalDir,
+        "build-cache.json"
+      ),
+      JSON.stringify(buildCache) + "\n"
     );
   },
 
@@ -1649,9 +1732,47 @@ export class MeteorConfig {
     }
   }
 
-  // Call this first if you plan to call getMainModuleForArch multiple
+  getNodeModulesToRecompileByArch() {
+    const packageNamesByArch = Object.create(null);
+    const recompile = this.get("nodeModules", "recompile");
+
+    if (recompile && typeof recompile === "object") {
+      const get = arch => packageNamesByArch[arch] || (
+        packageNamesByArch[arch] = new Set);
+
+      Object.keys(recompile).forEach(packageName => {
+        const info = recompile[packageName];
+        if (! info) return;
+        if (info === true) {
+          get("web").add(packageName);
+          get("os").add(packageName);
+        } else if (typeof info === "string") {
+          mapWhereToArches(info).forEach(arch => {
+            get(arch).add(packageName);
+          });
+        } else if (Array.isArray(info)) {
+          info.forEach(where => {
+            mapWhereToArches(where).forEach(arch => {
+              get(arch).add(packageName);
+            });
+          });
+        }
+      });
+    }
+
+    return packageNamesByArch;
+  }
+
+  getNodeModulesToRecompile(
+    arch,
+    packageNamesByArch = this.getNodeModulesToRecompileByArch(),
+  ) {
+    return packageNamesByArch[arch];
+  }
+
+  // Call this first if you plan to call getMainModule multiple
   // times, so that you can avoid repeating this work each time.
-  getMainModulesByArch(arch) {
+  getMainModulesByArch() {
     return this._getEntryModulesByArch("mainModule");
   }
 
@@ -1659,24 +1780,24 @@ export class MeteorConfig {
   // that architecture. For example, if this.config.mainModule.client is
   // defined, then because mapWhereToArch("client") === "web", and "web"
   // matches web.browser, return this.config.mainModule.client.
-  getMainModuleForArch(
+  getMainModule(
     arch,
     mainModulesByArch = this.getMainModulesByArch(),
   ) {
-    return this._getEntryModuleForArch(arch, mainModulesByArch);
+    return this._getEntryModule(arch, mainModulesByArch);
   }
 
   // Analogous to getMainModulesByArch, except for this.config.testModule.
-  getTestModulesByArch(arch) {
+  getTestModulesByArch() {
     return this._getEntryModulesByArch("testModule");
   }
 
-  // Analogous to getMainModuleForArch, except for this.config.testModule.
-  getTestModuleForArch(
+  // Analogous to getMainModule, except for this.config.testModule.
+  getTestModule(
     arch,
     testModulesByArch = this.getTestModulesByArch(),
   ) {
-    return this._getEntryModuleForArch(arch, testModulesByArch);
+    return this._getEntryModule(arch, testModulesByArch);
   }
 
   _getEntryModulesByArch(...keys) {
@@ -1703,7 +1824,7 @@ export class MeteorConfig {
     return entryModulesByArch;
   }
 
-  _getEntryModuleForArch(
+  _getEntryModule(
     arch,
     entryModulesByArch,
   ) {

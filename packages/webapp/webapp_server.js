@@ -1,6 +1,11 @@
 import assert from "assert";
-import { readFileSync } from "fs";
+import {
+  readFileSync,
+  chmodSync,
+  chownSync
+} from "fs";
 import { createServer } from "http";
+import { userInfo } from "os";
 import {
   join as pathJoin,
   dirname as pathDirname,
@@ -10,7 +15,7 @@ import { createHash } from "crypto";
 import { connect } from "./connect.js";
 import compress from "compression";
 import cookieParser from "cookie-parser";
-import query from "qs-middleware";
+import qs from "qs";
 import parseRequest from "parseurl";
 import basicAuth from "basic-auth-connect";
 import { lookup as lookupUserAgent } from "useragent";
@@ -20,6 +25,8 @@ import {
   removeExistingSocketFile,
   registerSocketFileCleanup,
 } from './socket_file.js';
+import cluster from "cluster";
+import whomst from "@vlasky/whomst";
 
 var SHORT_SOCKET_TIMEOUT = 5*1000;
 var LONG_SOCKET_TIMEOUT = 120*1000;
@@ -130,10 +137,63 @@ var identifyBrowser = function (userAgentString) {
 WebAppInternals.identifyBrowser = identifyBrowser;
 
 WebApp.categorizeRequest = function (req) {
-  return _.extend({
-    browser: identifyBrowser(req.headers['user-agent']),
-    url: parseUrl(req.url, true)
-  }, _.pick(req, 'dynamicHead', 'dynamicBody', 'headers', 'cookies'));
+  if (req.browser && req.arch && typeof req.modern === "boolean") {
+    // Already categorized.
+    return req;
+  }
+
+  const browser = identifyBrowser(req.headers["user-agent"]);
+  const modern = isModern(browser);
+  const path = typeof req.pathname === "string"
+   ? req.pathname
+   : parseRequest(req).pathname;
+
+  const categorized = {
+    browser,
+    modern,
+    path,
+    arch: WebApp.defaultArch,
+    url: parseUrl(req.url, true),
+    dynamicHead: req.dynamicHead,
+    dynamicBody: req.dynamicBody,
+    headers: req.headers,
+    cookies: req.cookies,
+  };
+
+  const pathParts = path.split("/");
+  const archKey = pathParts[1];
+
+  if (archKey.startsWith("__")) {
+    const archCleaned = "web." + archKey.slice(2);
+    if (hasOwn.call(WebApp.clientPrograms, archCleaned)) {
+      pathParts.splice(1, 1); // Remove the archKey part.
+      return Object.assign(categorized, {
+        arch: archCleaned,
+        path: pathParts.join("/"),
+      });
+    }
+  }
+
+  // TODO Perhaps one day we could infer Cordova clients here, so that we
+  // wouldn't have to use prefixed "/__cordova/..." URLs.
+  const preferredArchOrder = isModern(browser)
+    ? ["web.browser", "web.browser.legacy"]
+    : ["web.browser.legacy", "web.browser"];
+
+  for (const arch of preferredArchOrder) {
+    // If our preferred arch is not available, it's better to use another
+    // client arch that is available than to guarantee the site won't work
+    // by returning an unknown arch. For example, if web.browser.legacy is
+    // excluded using the --exclude-archs command-line option, legacy
+    // clients are better off receiving web.browser (which might actually
+    // work) than receiving an HTTP 404 response. If none of the archs in
+    // preferredArchOrder are defined, only then should we send a 404.
+    if (hasOwn.call(WebApp.clientPrograms, arch)) {
+      return Object.assign(categorized, { arch });
+    }
+  }
+
+  return categorized;
 };
 
 // HTML attribute hooks: functions to be called to determine any attributes to
@@ -214,6 +274,7 @@ Meteor.startup(function () {
   WebApp.calculateClientHash = WebApp.clientHash = getter("version");
   WebApp.calculateClientHashRefreshable = getter("versionRefreshable");
   WebApp.calculateClientHashNonRefreshable = getter("versionNonRefreshable");
+  WebApp.calculateClientHashReplaceable = getter("versionReplaceable");
   WebApp.getRefreshableAssets = getter("refreshableAssets");
 });
 
@@ -317,9 +378,11 @@ WebAppInternals.generateBoilerplateInstance = function (arch,
                                                         additionalOptions) {
   additionalOptions = additionalOptions || {};
 
-  var runtimeConfig = _.extend(
-    _.clone(__meteor_runtime_config__),
-    additionalOptions.runtimeConfigOverrides || {}
+  const meteorRuntimeConfig = JSON.stringify(
+    encodeURIComponent(JSON.stringify({
+      ...__meteor_runtime_config__,
+      ...(additionalOptions.runtimeConfigOverrides || {})
+    }))
   );
 
   return new Boilerplate(arch, manifest, _.extend({
@@ -342,8 +405,8 @@ WebAppInternals.generateBoilerplateInstance = function (arch,
       // end up inside a <script> tag so we need to be careful to not include
       // "</script>", but normal {{spacebars}} escaping escapes too much! See
       // https://github.com/meteor/meteor/issues/3730
-      meteorRuntimeConfig: JSON.stringify(
-        encodeURIComponent(JSON.stringify(runtimeConfig))),
+      meteorRuntimeConfig,
+      meteorRuntimeHash: sha1(meteorRuntimeConfig),
       rootUrlPathPrefix: __meteor_runtime_config__.ROOT_URL_PATH_PREFIX || '',
       bundledJsCssUrlRewriteHook: bundledJsCssUrlRewriteHook,
       sriMode: sriMode,
@@ -371,10 +434,6 @@ WebAppInternals.staticFilesMiddleware = async function (
   res,
   next,
 ) {
-  if ('GET' != req.method && 'HEAD' != req.method && 'OPTIONS' != req.method) {
-    next();
-    return;
-  }
   var pathname = parseRequest(req).pathname;
   try {
     pathname = decodeURIComponent(pathname);
@@ -384,11 +443,21 @@ WebAppInternals.staticFilesMiddleware = async function (
   }
 
   var serveStaticJs = function (s) {
-    res.writeHead(200, {
-      'Content-type': 'application/javascript; charset=UTF-8'
-    });
-    res.write(s);
-    res.end();
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      res.writeHead(200, {
+        'Content-type': 'application/javascript; charset=UTF-8',
+        'Content-Length': Buffer.byteLength(s),
+      });
+      res.write(s);
+      res.end();
+    } else {
+      const status = req.method === 'OPTIONS' ? 200 : 405;
+      res.writeHead(status, {
+        'Allow': 'OPTIONS, GET, HEAD',
+        'Content-Length': '0',
+      });
+      res.end();
+    }
   };
 
   if (_.has(additionalStaticJs, pathname) &&
@@ -397,10 +466,13 @@ WebAppInternals.staticFilesMiddleware = async function (
     return;
   }
 
-  const { arch, path } = getArchAndPath(
-    pathname,
-    identifyBrowser(req.headers["user-agent"]),
-  );
+  const { arch, path } = WebApp.categorizeRequest(req);
+
+  if (! hasOwn.call(WebApp.clientPrograms, arch)) {
+    // We could come here in case we run with some architectures excluded
+    next();
+    return;
+  }
 
   // If pauseClient(arch) has been called, program.paused will be a
   // Promise that will be resolved when the program is unpaused.
@@ -416,6 +488,16 @@ WebAppInternals.staticFilesMiddleware = async function (
   const info = getStaticFileInfo(staticFilesByArch, pathname, path, arch);
   if (! info) {
     next();
+    return;
+  }
+  // "send" will handle HEAD & GET requests
+  if (req.method !== 'HEAD' && req.method !== 'GET') {
+    const status = req.method === 'OPTIONS' ? 200 : 405;
+    res.writeHead(status, {
+      'Allow': 'OPTIONS, GET, HEAD',
+      'Content-Length': '0',
+    })
+    res.end();
     return;
   }
 
@@ -464,6 +546,7 @@ WebAppInternals.staticFilesMiddleware = async function (
   }
 
   if (info.content) {
+    res.setHeader('Content-Length', Buffer.byteLength(info.content));
     res.write(info.content);
     res.end();
   } else {
@@ -517,7 +600,7 @@ function getStaticFileInfo(staticFilesByArch, originalPath, path, arch) {
       return finalize(originalPath);
     }
 
-    // If getArchAndPath returned an alternate path, try that instead.
+    // If categorizeRequest returned an alternate path, try that instead.
     if (path !== originalPath &&
         hasOwn.call(staticFiles, path)) {
       return finalize(path);
@@ -525,37 +608,6 @@ function getStaticFileInfo(staticFilesByArch, originalPath, path, arch) {
   });
 
   return info;
-}
-
-function getArchAndPath(path, browser) {
-  const pathParts = path.split("/");
-  const archKey = pathParts[1];
-
-  if (archKey.startsWith("__")) {
-    const archCleaned = "web." + archKey.slice(2);
-    if (hasOwn.call(WebApp.clientPrograms, archCleaned)) {
-      pathParts.splice(1, 1); // Remove the archKey part.
-      return {
-        arch: archCleaned,
-        path: pathParts.join("/"),
-      };
-    }
-  }
-
-  // TODO Perhaps one day we could infer Cordova clients here, so that we
-  // wouldn't have to use prefixed "/__cordova/..." URLs.
-  const arch = isModern(browser)
-    ? "web.browser"
-    : "web.browser.legacy";
-
-  if (hasOwn.call(WebApp.clientPrograms, arch)) {
-    return { arch, path };
-  }
-
-  return {
-    arch: WebApp.defaultArch,
-    path,
-  };
 }
 
 // Parse the passed in port value. Return the port as-is if it's a String
@@ -711,7 +763,17 @@ function runWebAppServer() {
       versionRefreshable: () => WebAppHashing.calculateClientHash(
         manifest, type => type === "css", configOverrides),
       versionNonRefreshable: () => WebAppHashing.calculateClientHash(
-        manifest, type => type !== "css", configOverrides),
+        manifest, (type, replaceable) => type !== "css" && !replaceable, configOverrides),
+      versionReplaceable: () => WebAppHashing.calculateClientHash(
+        manifest, (_type, replaceable) => {
+          if (Meteor.isProduction && replaceable) {
+            throw new Error('Unexpected replaceable file in production');
+          }
+
+          return replaceable
+        },
+        configOverrides
+      ),
       cordovaCompatibilityVersions: programJson.cordovaCompatibilityVersions,
       PUBLIC_SETTINGS,
     };
@@ -850,7 +912,10 @@ function runWebAppServer() {
   //
   // Do this before the next middleware destroys req.url if a path prefix
   // is set to close #10111.
-  app.use(query());
+  app.use(function (request, response, next) {
+    request.query = qs.parse(parseUrl(request.url).query);
+    next();
+  });
 
   function getPathParts(path) {
     const parts = path.split("/");
@@ -866,7 +931,7 @@ function runWebAppServer() {
   // Strip off the path prefix, if it exists.
   app.use(function (request, response, next) {
     const pathPrefix = __meteor_runtime_config__.ROOT_URL_PATH_PREFIX;
-    const { pathname } = parseUrl(request.url);
+    const { pathname, search } = parseUrl(request.url);
 
     // check if the path in the url starts with the path prefix
     if (pathPrefix) {
@@ -874,6 +939,9 @@ function runWebAppServer() {
       const pathParts = getPathParts(pathname);
       if (isPrefixOf(prefixParts, pathParts)) {
         request.url = "/" + pathParts.slice(prefixParts.length).join("/");
+        if (search) {
+          request.url += search;
+        }
         return next();
       }
     }
@@ -928,6 +996,13 @@ function runWebAppServer() {
     if (! appUrl(req.url)) {
       return next();
 
+    } else if (req.method !== 'HEAD' && req.method !== 'GET') {
+      const status = req.method === 'OPTIONS' ? 200 : 405;
+      res.writeHead(status, {
+        'Allow': 'OPTIONS, GET, HEAD',
+        'Content-Length': '0',
+      })
+      res.end();
     } else {
       var headers = {
         'Content-Type': 'text/html; charset=utf-8'
@@ -977,10 +1052,21 @@ function runWebAppServer() {
         return;
       }
 
-      const { arch } = getArchAndPath(
-        parseRequest(req).pathname,
-        request.browser,
-      );
+      const { arch } = request;
+      assert.strictEqual(typeof arch, "string", { arch });
+
+      if (! hasOwn.call(WebApp.clientPrograms, arch)) {
+        // We could come here in case we run with some architectures excluded
+        headers['Cache-Control'] = 'no-cache';
+        res.writeHead(404, headers);
+        if (Meteor.isDevelopment) {
+          res.end(`No client program found for the ${arch} architecture.`);
+        } else {
+          // Safety net, but this branch should not be possible.
+          res.end("404 Not Found");
+        }
+        return;
+      }
 
       // If pauseClient(arch) has been called, program.paused will be a
       // Promise that will be resolved when the program is unpaused.
@@ -1100,12 +1186,36 @@ function runWebAppServer() {
     };
 
     let localPort = process.env.PORT || 0;
-    const unixSocketPath = process.env.UNIX_SOCKET_PATH;
+    let unixSocketPath = process.env.UNIX_SOCKET_PATH;
 
     if (unixSocketPath) {
+      if (cluster.isWorker) {
+        const workerName = cluster.worker.process.env.name || cluster.worker.id
+        unixSocketPath += "." + workerName + ".sock";
+      }
       // Start the HTTP server using a socket file.
       removeExistingSocketFile(unixSocketPath);
       startHttpServer({ path: unixSocketPath });
+
+      const unixSocketPermissions = (process.env.UNIX_SOCKET_PERMISSIONS || "").trim();
+      if (unixSocketPermissions) {
+        if (/^[0-7]{3}$/.test(unixSocketPermissions)) {
+          chmodSync(unixSocketPath, parseInt(unixSocketPermissions, 8));
+        } else {
+          throw new Error("Invalid UNIX_SOCKET_PERMISSIONS specified");
+        }
+      }
+
+      const unixSocketGroup = (process.env.UNIX_SOCKET_GROUP || "").trim();
+      if (unixSocketGroup) {
+        //whomst automatically handles both group names and numerical gids
+        const unixSocketGroupInfo = whomst.sync.group(unixSocketGroup);
+        if (unixSocketGroupInfo === null) {
+          throw new Error("Invalid UNIX_SOCKET_GROUP name specified");
+        }
+        chownSync(unixSocketPath, userInfo().uid, unixSocketGroupInfo.gid);
+      }
+
       registerSocketFileCleanup(unixSocketPath);
     } else {
       localPort = isNaN(Number(localPort)) ? localPort : Number(localPort);

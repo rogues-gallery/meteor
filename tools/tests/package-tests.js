@@ -2,7 +2,7 @@ var _= require('underscore');
 
 var selftest = require('../tool-testing/selftest.js');
 var Sandbox = selftest.Sandbox;
-var files = require('../fs/files.js');
+var files = require('../fs/files');
 var testUtils = require('../tool-testing/test-utils.js');
 var utils = require('../utils/utils.js');
 var packageClient = require('../packaging/package-client.js');
@@ -369,7 +369,9 @@ selftest.define("add packages client archs", function (options) {
       run.match("all clients " + (expectedLogNum++));
       run.match(clientType + " client " + (expectedLogNum++));
       run.stop();
-    }, args);
+    }, { args,
+      testName: 'add packages client archs',
+      testFile: 'package-tests.js' });
   };
 
   runTestWithArgs("browser", [], 3000);

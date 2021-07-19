@@ -1,17 +1,17 @@
 import assert from "assert";
-import {WatchSet, readAndWatchFile, sha1} from '../fs/watch.js';
+import {WatchSet, readAndWatchFile, sha1} from '../fs/watch';
 import files, {
-  symlinkWithOverwrite,
-} from '../fs/files.js';
-import NpmDiscards from './npm-discards.js';
-import {Profile} from '../tool-env/profile.js';
+  symlinkWithOverwrite, realpath,
+} from '../fs/files';
+import NpmDiscards from './npm-discards';
+import {Profile} from '../tool-env/profile';
 import {
   optimisticReadFile,
   optimisticReaddir,
   optimisticStatOrNull,
   optimisticLStatOrNull,
   optimisticHashOrNull,
-} from "../fs/optimistic.js";
+} from "../fs/optimistic";
 
 // Builder is in charge of writing "bundles" to disk, which are
 // directory trees such as site archives, programs, and packages.  In
@@ -343,6 +343,79 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
     return relPath;
   }
 
+  copyTranspiledModules(relativePaths, {
+    sourceRootDir,
+    targetRootDir = this.outputPath,
+    needToTranspile = files.inCheckout(),
+  }) {
+    if (!needToTranspile) {
+      // If these files have already been transpiled, copy the transpiled files
+      // (both .js and .js.map) directly to the builder output directory, without
+      // recompiling them.
+      relativePaths.forEach(relPath => {
+        const jsPath = jsToTs(relPath);
+        [jsPath, jsPath + ".map"].forEach(path => {
+          this.write(path, {
+            file: files.pathJoin(sourceRootDir, path),
+          });
+        });
+      });
+      return;
+    }
+
+    const babel = require("@meteorjs/babel");
+    const commonBabelOptions = babel.getDefaultOptions({
+      nodeMajorVersion: parseInt(process.versions.node),
+      typescript: true
+    });
+    commonBabelOptions.sourceMaps = true;
+
+    const toolsDir = files.getCurrentToolsDir();
+    const babelCacheDirectory =
+      files.pathJoin(files.pathDirname(toolsDir), ".babel-cache");
+
+    relativePaths.forEach(relPath => {
+      assert.ok(!files.pathIsAbsolute(relPath), relPath);
+      const fullPath = files.pathJoin(sourceRootDir, relPath);
+      let inputFileContents = files.readFile(fullPath, "utf-8");
+
+      // If certain behavior should be disabled in the transpiled code, the
+      // #RemoveInProd comment can be added to strip out appropriate lines.
+      inputFileContents = inputFileContents.replace(/^.*#RemoveInProd.*$/mg, "");
+
+      var transpiled = babel.compile(inputFileContents, {
+        ...commonBabelOptions,
+        filename: relPath,
+        sourceFileName: "/" + relPath,
+      }, {
+        cacheDirectory: babelCacheDirectory,
+      });
+
+      // The published implementation of the meteor-tool package should
+      // contain only .js files, like any compiled TypeScript project.
+      // This design has the unfortunate consequence of forbidding
+      // explicit .ts file extensions in imported module identifier
+      // strings, but that's just how it goes with TypeScript.
+      let outputPath = jsToTs(relPath);
+
+      const sourceMapUrlComment =
+        "//# sourceMappingURL=" + files.pathBasename(outputPath + ".map");
+
+      this.write(outputPath, {
+        data: Buffer.from(transpiled.code + "\n" + sourceMapUrlComment, 'utf8')
+      });
+
+      // The babelOptions.sourceMapTarget option was deprecated in Babel
+      // 7.0.0-beta.41: https://github.com/babel/babel/pull/7500
+      const sourceMapTarget = outputPath + ".map";
+      transpiled.map.file = sourceMapTarget;
+
+      this.write(sourceMapTarget, {
+        data: Buffer.from(JSON.stringify(transpiled.map), 'utf8')
+      });
+    });
+  }
+
   // Serialize `data` as JSON and write it to `relPath` (a path to a
   // file relative to the bundle root), creating parent directories as
   // necessary. Throw an exception if the file already exists.
@@ -467,7 +540,7 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
       // as well as node_modules/meteor and the parent directories of any
       // scoped npm packages.
       this._ensureAllNonPackageDirectories(
-        files.realpath(options.from),
+        realpath(options.from),
         options.to
       );
     }
@@ -564,7 +637,7 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
       });
     }
 
-    const rootDir = files.realpath(from);
+    const rootDir = realpath(from);
 
     const walk = (absFrom, relTo) => {
       if (symlink && ! (relTo in this.usedAsFile)) {
@@ -588,7 +661,7 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
           return;
         }
 
-        // Returns files.realpath(thisAbsFrom), iff it is external to
+        // Returns files.realpath(thisAbsFrom), if it is external to
         // rootDir, using caching because this function might be called
         // more than once.
         let cachedExternalPath;
@@ -598,7 +671,7 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
           }
 
           try {
-            var real = files.realpath(thisAbsFrom);
+            var real = realpath(thisAbsFrom);
           } catch (e) {
             if (e.code !== "ENOENT" &&
                 e.code !== "ELOOP") {
@@ -770,7 +843,10 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
 
     // Methods that don't have to fix up arguments or return values, because
     // they are implemented purely in terms of other methods which do.
-    const passThroughMethods = ["writeToGeneratedFilename"];
+    const passThroughMethods = [
+      "writeToGeneratedFilename",
+      "copyTranspiledModules",
+    ];
     passThroughMethods.forEach(method => {
       subBuilder[method] = this[method];
     });
@@ -832,6 +908,16 @@ Previous builder: ${previousBuilder.outputPath}, this builder: ${outputPath}`
   getWatchSet() {
     return this.watchSet;
   }
+}
+
+function jsToTs(path) {
+  if (path.endsWith(".ts")) {
+    const parts = path.split(".");
+    assert.strictEqual(parts.pop(), "ts");
+    parts.push("js");
+    path = parts.join(".");
+  }
+  return path;
 }
 
 function atomicallyRewriteFile(path, data, options) {

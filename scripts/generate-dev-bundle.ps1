@@ -4,7 +4,8 @@ $DebugPreference = "Continue"
 Import-Module -Force "$PSScriptRoot\windows\dev-bundle-lib.psm1"
 $PLATFORM = Get-MeteorPlatform
 
-$PYTHON_VERSION = "2.7.14" # For node-gyp
+$PYTHON_VERSION = "3.9.5" # For node-gyp
+& cmd /c 'du 2>&1'
 
 $dirCheckout = (Get-Item $PSScriptRoot).parent.FullName
 $shCommon = Join-Path $PSScriptRoot 'build-dev-bundle-common.sh'
@@ -19,7 +20,6 @@ $BUNDLE_VERSION = Read-VariableFromShellScript "${dirCheckout}\meteor" 'BUNDLE_V
 
 # extract the major package versions from the build-dev-bundle-common script.
 $MONGO_VERSION_64BIT = Read-VariableFromShellScript $shCommon 'MONGO_VERSION_64BIT'
-$MONGO_VERSION_32BIT = Read-VariableFromShellScript $shCommon 'MONGO_VERSION_32BIT'
 
 $NPM_VERSION = Read-VariableFromShellScript $shCommon 'NPM_VERSION'
 
@@ -57,7 +57,7 @@ Function Invoke-Install7ZipApplication {
   Write-Host "Downloading 7-zip..." -ForegroundColor Magenta
   $7zMsiPath = Join-Path $dirTemp '7z.msi'
   # 32-bit, right now.  But this does not go in the bundle.
-  $webclient.DownloadFile("http://www.7-zip.org/a/7z1604.msi", $7zMsiPath)
+  $webclient.DownloadFile("https://www.7-zip.org/a/7z1604.msi", $7zMsiPath)
 
   Write-Host "Installing 7-zip system-wide..." -ForegroundColor Magenta
   & "msiexec.exe" /i $7zMsiPath /quiet /qn /norestart | Out-Null
@@ -69,12 +69,9 @@ Function Invoke-Install7ZipApplication {
 Function Add-7ZipTool {
   Write-Host "Downloading 7-zip 'extra'..." -ForegroundColor Magenta
   $extraArchive = Join-Path $dirTemp 'extra.7z'
-  $webclient.DownloadFile("http://www.7-zip.org/a/7z1604-extra.7z", $extraArchive)
+  $webclient.DownloadFile("https://www.7-zip.org/a/7z1604-extra.7z", $extraArchive)
 
   $pathToExtract = 'x64/7za.exe'
-  if ($PLATFORM -eq "windows_x86") {
-    $pathToExtract = '7za.exe'
-  }
 
   Write-Host 'Placing 7za.exe from extra.7z in \bin...' -ForegroundColor Magenta
   & "$system7zip" e $extraArchive -o"$dirTemp" $pathToExtract | Out-Null
@@ -118,11 +115,7 @@ Function Add-NodeAndNpm {
     $nodeUrlBase = 'https://nodejs.org/dist'
   }
 
-  if ($PLATFORM -eq "windows_x86") {
-    $nodeArchitecture = 'win-x86'
-  } else {
-    $nodeArchitecture = 'win-x64'
-  }
+  $nodeArchitecture = 'win-x64'
 
   # Various variables which are used as part of directory paths and
   # inside Node release and header archives.
@@ -231,8 +224,12 @@ Function Add-Mongo {
   # Mongo >= 3.4 no longer supports 32-bit (x86) architectures, so we package
   # the latest 3.2 version of Mongo for those builds and >= 3.4 for x64.
   $mongo_filenames = @{
-    windows_x86 = "mongodb-win32-i386-${MONGO_VERSION_32BIT}"
-    windows_x64 = "mongodb-win32-x86_64-2008plus-ssl-${MONGO_VERSION_64BIT}"
+    windows_x64 = "mongodb-windows-x86_64-${MONGO_VERSION_64BIT}"
+  }
+
+  # the folder inside the zip still uses win32
+  $mongo_zip_filenames = @{
+    windows_x64 = "mongodb-win32-x86_64-windows-${MONGO_VERSION_64BIT}"
   }
 
   $previousCwd = $PWD
@@ -240,9 +237,9 @@ Function Add-Mongo {
   cd "$DIR"
   mkdir "$DIR\mongodb"
   mkdir "$DIR\mongodb\bin"
-
   $mongo_name = $mongo_filenames.Item($PLATFORM)
-  $mongo_link = "https://fastdl.mongodb.org/win32/${mongo_name}.zip"
+  $mongo_zip_name = $mongo_zip_filenames.Item($PLATFORM)
+  $mongo_link = "https://fastdl.mongodb.org/windows/${mongo_name}.zip"
   $mongo_zip = "$DIR\mongodb\mongo.zip"
 
   Write-Host "Downloading Mongo from ${mongo_link}..." -ForegroundColor Magenta
@@ -255,26 +252,14 @@ Function Add-Mongo {
   }
 
   Write-Host "Putting MongoDB mongod.exe in mongodb\bin" -ForegroundColor Magenta
-  cp "$DIR\mongodb\$mongo_name\bin\mongod.exe" $DIR\mongodb\bin
+  cp "$DIR\mongodb\$mongo_zip_name\bin\mongod.exe" $DIR\mongodb\bin
   Write-Host "Putting MongoDB mongo.exe in mongodb\bin" -ForegroundColor Magenta
-  cp "$DIR\mongodb\$mongo_name\bin\mongo.exe" $DIR\mongodb\bin
-
-  # https://jira.mongodb.org/browse/SERVER-19086
-  $libeay32dll = "$DIR\mongodb\$mongo_name\bin\libeay32.dll"
-  if (Test-Path $libeay32dll) {
-    Write-Host "Putting MongoDB libeay32.dll in mongodb\bin" -ForegroundColor Magenta
-    cp $libeay32dll $DIR\mongodb\bin
-  }
-  $ssleay32dll = "$DIR\mongodb\$mongo_name\bin\ssleay32.dll"
-  if (Test-Path $ssleay32dll) {
-    Write-Host "Putting MongoDB ssleay32.dll in mongodb\bin" -ForegroundColor Magenta
-    cp $ssleay32dll $DIR\mongodb\bin
-  }
+  cp "$DIR\mongodb\$mongo_zip_name\bin\mongo.exe" $DIR\mongodb\bin
 
   Write-Host "Removing the old Mongo zip..." -ForegroundColor Magenta
   rm -Recurse -Force $mongo_zip
   Write-Host "Removing the old Mongo directory..." -ForegroundColor Magenta
-  rm -Recurse -Force "$DIR\mongodb\$mongo_name"
+  rm -Recurse -Force "$DIR\mongodb\$mongo_zip_name"
 
   cd "$previousCwd"
 }
@@ -321,23 +306,11 @@ Function Add-NpmModulesFromJsBundleFile {
 
   cd node_modules
 
-  # @babel/runtime@7.0.0-beta.56 removed the @babel/runtime/helpers/builtin
-  # directory, since all helpers are now implemented in the built-in style
-  # (meaning they do not import core-js polyfills). Generated code in build
-  # plugins might still refer to the old directory layout (at least for the
-  # time being), but we can accommodate that by symlinking to the parent
-  # directory, since all the module names are the same.
-  if ((Test-Path "@babel\runtime\helpers") -And
-      !(Test-Path "@babel\runtime\helpers\builtin")) {
-    cd @babel\runtime\helpers
-    & "$($Commands.node)" -e 'require("fs").symlinkSync(".", "builtin", "junction")'
-    cd ..\..\..
-  }
-
   # Since we install a patched version of pacote in $Destination\lib\node_modules,
   # we need to remove npm's bundled version to make it use the new one.
   if (Test-Path "pacote") {
     Remove-DirectoryRecursively "npm\node_modules\pacote"
+    & "$($Commands.node)" -e "require('fs').renameSync('pacote', 'npm\\node_modules\\pacote')"
   }
 
   cd "$previousCwd"

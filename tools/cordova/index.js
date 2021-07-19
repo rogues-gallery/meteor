@@ -2,21 +2,30 @@ import _ from 'underscore';
 import assert from 'assert';
 import utils from '../utils/utils.js';
 import buildmessage from '../utils/buildmessage.js';
+import {
+  pathJoin,
+  statOrNull,
+  getDevBundle,
+  rm_recursive,
+} from '../fs/files';
 
 export const CORDOVA_ARCH = "web.cordova";
 
 export const CORDOVA_PLATFORMS = ['ios', 'android'];
 
 export const CORDOVA_DEV_BUNDLE_VERSIONS = {
-  'cordova-lib': '7.1.0',
-  'cordova-common': '2.1.1',
+  'cordova-lib': '10.0.0',
+  'cordova-common': '4.0.2',
+  'cordova-create': '2.0.0',
   'cordova-registry-mapper': '1.1.15',
 };
 
 export const CORDOVA_PLATFORM_VERSIONS = {
-  'android': '7.1.4',
-  'ios': '4.5.5',
+  'android': '9.0.0',
+  'ios': '6.2.0',
 };
+
+export const SWIFT_VERSION = 5;
 
 const PLATFORM_TO_DISPLAY_NAME_MAP = {
   'ios': 'iOS',
@@ -31,6 +40,27 @@ export function ensureDevBundleDependencies() {
     () => {
       require("../cli/dev-bundle-helpers.js")
         .ensureDependencies(CORDOVA_DEV_BUNDLE_VERSIONS);
+
+      const cordovaNodeModulesDir = pathJoin(
+        getDevBundle(),
+        "lib",
+        "node_modules",
+        "cordova-lib",
+        "node_modules",
+      );
+
+      [
+        // Remove these bundled packages in preference to
+        // dev_bundle/lib/node_modules/<package name>:
+        "graceful-fs",
+        pathJoin("npm", "node_modules", "graceful-fs"),
+      ].forEach(pkg => {
+        const path = pathJoin(cordovaNodeModulesDir, pkg);
+        const stat = statOrNull(path);
+        if (stat && stat.isDirectory()) {
+          rm_recursive(path);
+        }
+      });
     }
   );
 }

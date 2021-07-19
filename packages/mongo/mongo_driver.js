@@ -7,6 +7,8 @@
  * these outside of a fiber they will explode!
  */
 
+const path = require("path");
+
 var MongoDB = NpmModuleMongodb;
 var Future = Npm.require('fibers/future');
 import { DocFetcher } from "./doc_fetcher.js";
@@ -25,6 +27,10 @@ MongoInternals.NpmModules = {
 // people do use it.
 // XXX COMPAT WITH 1.0.3.2
 MongoInternals.NpmModule = MongoDB;
+
+const FILE_ASSET_SUFFIX = 'Asset';
+const ASSETS_FOLDER = 'assets';
+const APP_FOLDER = 'app';
 
 // This is used to add or remove EJSON from the beginning of everything nested
 // inside an EJSON custom type. It should only be called on pure JSON!
@@ -133,16 +139,30 @@ MongoConnection = function (url, options) {
   self._observeMultiplexers = {};
   self._onFailoverHook = new Hook;
 
+  const userOptions = {
+    ...(Mongo._connectionOptions || {}),
+    ...(Meteor.settings?.packages?.mongo?.options || {})
+  };
+
   var mongoOptions = Object.assign({
-    // Reconnect on error.
-    autoReconnect: true,
+    ignoreUndefined: true,
+    // (node:59240) [MONGODB DRIVER] Warning: Current Server Discovery and
+    // Monitoring engine is deprecated, and will be removed in a future version.
+    // To use the new Server Discover and Monitoring engine, pass option
+    // { useUnifiedTopology: true } to the MongoClient constructor.
+    useUnifiedTopology: true,
+  }, userOptions);
+
+  // The autoReconnect and reconnectTries options are incompatible with
+  // useUnifiedTopology: https://github.com/meteor/meteor/pull/10861#commitcomment-37525845
+  if (!mongoOptions.useUnifiedTopology) {
+    // Reconnect on error. This defaults to true, but it never hurts to be
+    // explicit about it.
+    mongoOptions.autoReconnect = true;
     // Try to reconnect forever, instead of stopping after 30 tries (the
     // default), with each attempt separated by 1000ms.
-    reconnectTries: Infinity,
-    ignoreUndefined: true,
-    // Required to silence deprecation warnings with mongodb@3.1.1.
-    useNewUrlParser: true,
-  }, Mongo._connectionOptions);
+    mongoOptions.reconnectTries = Infinity;
+  }
 
   // Disable the native parser by default, unless specifically enabled
   // in the mongo URL.
@@ -163,6 +183,17 @@ MongoConnection = function (url, options) {
     // set it for replSet, it will be ignored if we're not using a replSet.
     mongoOptions.poolSize = options.poolSize;
   }
+
+  // Transform options like "tlsCAFileAsset": "filename.pem" into
+  // "tlsCAFile": "/<fullpath>/filename.pem"
+  Object.entries(mongoOptions || {})
+    .filter(([key]) => key && key.endsWith(FILE_ASSET_SUFFIX))
+    .forEach(([key, value]) => {
+      const optionName = key.replace(FILE_ASSET_SUFFIX, '');
+      mongoOptions[optionName] = path.join(Assets.getServerDir(),
+        ASSETS_FOLDER, APP_FOLDER, value);
+      delete mongoOptions[key];
+    });
 
   self.db = null;
   // We keep track of the ReplSet's primary, so that we can trigger hooks when
@@ -511,6 +542,8 @@ MongoConnection.prototype._update = function (collection_name, selector, mod,
   try {
     var collection = self.rawCollection(collection_name);
     var mongoOpts = {safe: true};
+    // Add support for filtered positional operator
+    if (options.arrayFilters !== undefined) mongoOpts.arrayFilters = options.arrayFilters;
     // explictly enumerate options that minimongo supports
     if (options.upsert) mongoOpts.upsert = true;
     if (options.multi) mongoOpts.multi = true;
@@ -889,13 +922,6 @@ _.each(['forEach', 'map', 'fetch', 'count', Symbol.iterator], function (method) 
   };
 });
 
-// Since we don't actually have a "nextObject" interface, there's really no
-// reason to have a "rewind" interface.  All it did was make multiple calls
-// to fetch/map/forEach return nothing the second time.
-// XXX COMPAT WITH 0.8.1
-Cursor.prototype.rewind = function () {
-};
-
 Cursor.prototype.getTransform = function () {
   return this._cursorDescription.options.transform;
 };
@@ -923,7 +949,7 @@ Cursor.prototype.observe = function (callbacks) {
   return LocalCollection._observeFromObserveChanges(self, callbacks);
 };
 
-Cursor.prototype.observeChanges = function (callbacks) {
+Cursor.prototype.observeChanges = function (callbacks, options = {}) {
   var self = this;
   var methods = [
     'addedAt',
@@ -936,8 +962,8 @@ Cursor.prototype.observeChanges = function (callbacks) {
   ];
   var ordered = LocalCollection._observeChangesCallbacksAreOrdered(callbacks);
 
-  // XXX: Can we find out if callbacks are from observe?
-  var exceptionName = ' observe/observeChanges callback';
+  let exceptionName = callbacks._fromObserve ? 'observe' : 'observeChanges';
+  exceptionName += ' callback';
   methods.forEach(function (method) {
     if (callbacks[method] && typeof callbacks[method] == "function") {
       callbacks[method] = Meteor.bindEnvironment(callbacks[method], method + exceptionName);
@@ -945,7 +971,7 @@ Cursor.prototype.observeChanges = function (callbacks) {
   });
 
   return self._mongo._observeChanges(
-    self._cursorDescription, ordered, callbacks);
+    self._cursorDescription, ordered, callbacks, options.nonMutatingCallbacks);
 };
 
 MongoConnection.prototype._createSynchronousCursor = function(
@@ -959,7 +985,8 @@ MongoConnection.prototype._createSynchronousCursor = function(
     sort: cursorOptions.sort,
     limit: cursorOptions.limit,
     skip: cursorOptions.skip,
-    projection: cursorOptions.fields
+    projection: cursorOptions.fields,
+    readPreference: cursorOptions.readPreference
   };
 
   // Do we want a tailable cursor (which only works on capped collections)?
@@ -1246,7 +1273,7 @@ MongoConnection.prototype.tail = function (cursorDescription, docCallback, timeo
 };
 
 MongoConnection.prototype._observeChanges = function (
-    cursorDescription, ordered, callbacks) {
+    cursorDescription, ordered, callbacks, nonMutatingCallbacks) {
   var self = this;
 
   if (cursorDescription.options.tailable) {
@@ -1287,7 +1314,10 @@ MongoConnection.prototype._observeChanges = function (
     }
   });
 
-  var observeHandle = new ObserveHandle(multiplexer, callbacks);
+  var observeHandle = new ObserveHandle(multiplexer,
+    callbacks,
+    nonMutatingCallbacks,
+  );
 
   if (firstHandle) {
     var matcher, sorter;

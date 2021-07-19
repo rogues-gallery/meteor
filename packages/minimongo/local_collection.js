@@ -669,17 +669,18 @@ LocalCollection._CachingChangeObserver = class _CachingChangeObserver {
       this.docs = new OrderedDict(MongoID.idStringify);
       this.applyChange = {
         addedBefore: (id, fields, before) => {
-          const doc = EJSON.clone(fields);
+          // Take a shallow copy since the top-level properties can be changed
+          const doc = { ...fields };
 
           doc._id = id;
 
           if (callbacks.addedBefore) {
-            callbacks.addedBefore.call(this, id, fields, before);
+            callbacks.addedBefore.call(this, id, EJSON.clone(fields), before);
           }
 
           // This line triggers if we provide added with movedBefore.
           if (callbacks.added) {
-            callbacks.added.call(this, id, fields);
+            callbacks.added.call(this, id, EJSON.clone(fields));
           }
 
           // XXX could `before` be a falsy ID?  Technically
@@ -701,10 +702,11 @@ LocalCollection._CachingChangeObserver = class _CachingChangeObserver {
       this.docs = new LocalCollection._IdMap;
       this.applyChange = {
         added: (id, fields) => {
-          const doc = EJSON.clone(fields);
+          // Take a shallow copy since the top-level properties can be changed
+          const doc = { ...fields };
 
           if (callbacks.added) {
-            callbacks.added.call(this, id, fields);
+            callbacks.added.call(this, id, EJSON.clone(fields));
           }
 
           doc._id = id;
@@ -878,7 +880,7 @@ LocalCollection._compileProjection = fields => {
     const result = details.including ? {} : EJSON.clone(doc);
 
     Object.keys(ruleTree).forEach(key => {
-      if (!hasOwn.call(doc, key)) {
+      if (doc == null || !hasOwn.call(doc, key)) {
         return;
       }
 
@@ -897,7 +899,7 @@ LocalCollection._compileProjection = fields => {
       }
     });
 
-    return result;
+    return doc != null ? result : doc;
   };
 
   return doc => {
@@ -1330,7 +1332,12 @@ LocalCollection._observeFromObserveChanges = (cursor, observeCallbacks) => {
     callbacks: observeChangesCallbacks
   });
 
-  const handle = cursor.observeChanges(changeObserver.applyChange);
+  // CachingChangeObserver clones all received input on its callbacks
+  // So we can mark it as safe to reduce the ejson clones.
+  // This is tested by the `mongo-livedata - (extended) scribbling` tests
+  changeObserver.applyChange._fromObserve = true;
+  const handle = cursor.observeChanges(changeObserver.applyChange,
+    { nonMutatingCallbacks: true });
 
   suppressed = false;
 
@@ -1461,6 +1468,24 @@ const MODIFIERS = {
 
     target[field] = new Date();
   },
+  $inc(target, field, arg) {
+    if (typeof arg !== 'number') {
+      throw MinimongoError('Modifier $inc allowed for numbers only', {field});
+    }
+
+    if (field in target) {
+      if (typeof target[field] !== 'number') {
+        throw MinimongoError(
+          'Cannot apply $inc modifier to non-number',
+          {field}
+        );
+      }
+
+      target[field] += arg;
+    } else {
+      target[field] = arg;
+    }
+  },
   $min(target, field, arg) {
     if (typeof arg !== 'number') {
       throw MinimongoError('Modifier $min allowed for numbers only', {field});
@@ -1501,23 +1526,63 @@ const MODIFIERS = {
       target[field] = arg;
     }
   },
-  $inc(target, field, arg) {
+  $mul(target, field, arg) {
     if (typeof arg !== 'number') {
-      throw MinimongoError('Modifier $inc allowed for numbers only', {field});
+      throw MinimongoError('Modifier $mul allowed for numbers only', {field});
     }
 
     if (field in target) {
       if (typeof target[field] !== 'number') {
         throw MinimongoError(
-          'Cannot apply $inc modifier to non-number',
+          'Cannot apply $mul modifier to non-number',
           {field}
         );
       }
 
-      target[field] += arg;
+      target[field] *= arg;
     } else {
-      target[field] = arg;
+      target[field] = 0;
     }
+  },
+  $rename(target, field, arg, keypath, doc) {
+    // no idea why mongo has this restriction..
+    if (keypath === arg) {
+      throw MinimongoError('$rename source must differ from target', {field});
+    }
+
+    if (target === null) {
+      throw MinimongoError('$rename source field invalid', {field});
+    }
+
+    if (typeof arg !== 'string') {
+      throw MinimongoError('$rename target must be a string', {field});
+    }
+
+    if (arg.includes('\0')) {
+      // Null bytes are not allowed in Mongo field names
+      // https://docs.mongodb.com/manual/reference/limits/#Restrictions-on-Field-Names
+      throw MinimongoError(
+        'The \'to\' field for $rename cannot contain an embedded null byte',
+        {field}
+      );
+    }
+
+    if (target === undefined) {
+      return;
+    }
+
+    const object = target[field];
+
+    delete target[field];
+
+    const keyparts = arg.split('.');
+    const target2 = findModTarget(doc, keyparts, {forbidArray: true});
+
+    if (target2 === null) {
+      throw MinimongoError('$rename target field invalid', {field});
+    }
+
+    target2[keyparts.pop()] = object;
   },
   $set(target, field, arg) {
     if (target !== Object(target)) { // not an array or an object
@@ -1802,46 +1867,6 @@ const MODIFIERS = {
     target[field] = toPull.filter(object =>
       !arg.some(element => LocalCollection._f._equal(object, element))
     );
-  },
-  $rename(target, field, arg, keypath, doc) {
-    // no idea why mongo has this restriction..
-    if (keypath === arg) {
-      throw MinimongoError('$rename source must differ from target', {field});
-    }
-
-    if (target === null) {
-      throw MinimongoError('$rename source field invalid', {field});
-    }
-
-    if (typeof arg !== 'string') {
-      throw MinimongoError('$rename target must be a string', {field});
-    }
-
-    if (arg.includes('\0')) {
-      // Null bytes are not allowed in Mongo field names
-      // https://docs.mongodb.com/manual/reference/limits/#Restrictions-on-Field-Names
-      throw MinimongoError(
-        'The \'to\' field for $rename cannot contain an embedded null byte',
-        {field}
-      );
-    }
-
-    if (target === undefined) {
-      return;
-    }
-
-    const object = target[field];
-
-    delete target[field];
-
-    const keyparts = arg.split('.');
-    const target2 = findModTarget(doc, keyparts, {forbidArray: true});
-
-    if (target2 === null) {
-      throw MinimongoError('$rename target field invalid', {field});
-    }
-
-    target2[keyparts.pop()] = object;
   },
   $bit(target, field, arg) {
     // XXX mongo only supports $bit on integers, and we only support

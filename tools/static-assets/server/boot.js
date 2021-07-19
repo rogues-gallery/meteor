@@ -5,12 +5,12 @@ var Future = require("fibers/future");
 var sourcemap_support = require('source-map-support');
 
 var bootUtils = require('./boot-utils.js');
-var files = require('./mini-files.js');
+var files = require('./mini-files');
 var npmRequire = require('./npm-require.js').require;
-var Profile = require('./profile.js').Profile;
+var Profile = require('./profile').Profile;
 
 // This code is duplicated in tools/main.js.
-var MIN_NODE_VERSION = 'v8.0.0';
+var MIN_NODE_VERSION = 'v14.0.0';
 
 var hasOwn = Object.prototype.hasOwnProperty;
 
@@ -55,7 +55,7 @@ const meteorDebugFuture =
 
 function maybeWaitForDebuggerToAttach() {
   if (meteorDebugFuture) {
-    const { pause } = require("./debug.js");
+    const { pause } = require("./debug");
     const pauseThresholdMs = 50;
     const pollIntervalMs = 500;
     const waitStartTimeMs = +new Date;
@@ -360,15 +360,18 @@ var loadServerBundles = Profile("Load server bundles", function () {
         // Unicode normalize the asset path to prevent string mismatches when
         // using this string elsewhere.
         assetPath = files.unicodeNormalizePath(assetPath);
+        assetPath = files.convertToStandardPath(assetPath);
 
         if (! fileInfo.assets || ! hasOwn.call(fileInfo.assets, assetPath)) {
           throw new Error("Unknown asset: " + assetPath);
         }
 
-        assetPath = files.convertToStandardPath(assetPath);
         var filePath = path.join(serverDir, fileInfo.assets[assetPath]);
         return files.convertToOSPath(filePath);
       },
+      getServerDir: function() {
+        return serverDir;
+      }
     };
 
     var wrapParts = ["(function(Npm,Assets"];
