@@ -47,6 +47,8 @@ SET NODE_PATH=%~dp0\dev_bundle\lib\node_modules
 SET BABEL_CACHE_DIR=%~dp0\.babel-cache
 
 "%~dp0\dev_bundle\bin\node.exe" ^
+  --no-wasm-code-gc ^
+  --require="%~dp0\tools\node-process-warnings.js" ^
   %TOOL_NODE_FLAGS% ^
   "%~dp0\tools\index.js" %*
 

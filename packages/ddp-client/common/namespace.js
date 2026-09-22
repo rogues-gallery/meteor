@@ -1,6 +1,5 @@
 import { DDPCommon } from 'meteor/ddp-common';
 import { Meteor } from 'meteor/meteor';
-import { keys } from "meteor/ddp-common/utils.js";
 
 import { Connection } from './livedata_connection.js';
 
@@ -23,6 +22,8 @@ DDP._CurrentPublicationInvocation = new Meteor.EnvironmentVariable();
 
 // XXX: Keep DDP._CurrentInvocation for backwards-compatibility.
 DDP._CurrentInvocation = DDP._CurrentMethodInvocation;
+
+DDP._CurrentCallAsyncInvocation = new Meteor.EnvironmentVariable();
 
 // This is passed into a weird `makeErrorType` function that expects its thing
 // to be a constructor
@@ -59,11 +60,26 @@ DDP.randomStream = name => {
  * @summary Connect to the server of a different Meteor application to subscribe to its document sets and invoke its remote methods.
  * @locus Anywhere
  * @param {String} url The URL of another Meteor application.
+ * @param {Object} [options]
+ * @param {Boolean} options.reloadWithOutstanding is it OK to reload if there are outstanding methods?
+ * @param {Object} options.headers extra headers to send on the websockets connection, for server-to-server DDP only
+ * @param {Object} options._sockjsOptions Specifies options to pass through to the sockjs client
+ * @param {Function} options.onDDPNegotiationVersionFailure callback when version negotiation fails.
  */
 DDP.connect = (url, options) => {
   const ret = new Connection(url, options);
   allConnections.push(ret); // hack. see below.
   return ret;
+};
+
+// Called by Connection#close(): a permanently closed connection must not
+// stay in allConnections, where _allSubscriptionsReady would consult it
+// forever.
+DDP._removeConnection = connection => {
+  const index = allConnections.indexOf(connection);
+  if (index !== -1) {
+    allConnections.splice(index, 1);
+  }
 };
 
 DDP._reconnectHook = new Hook({ bindEnvironment: false });

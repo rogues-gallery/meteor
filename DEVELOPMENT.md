@@ -24,7 +24,7 @@ can run Meteor directly from a Git checkout using these steps:
     >
     >     $ git submodule update --init --recursive
 
-0. **Run a Meteor command to install dependencies**
+2. **Run a Meteor command to install dependencies**
 
     > If you did not compile dependencies above, this will also download the binaries.
 
@@ -33,7 +33,15 @@ can run Meteor directly from a Git checkout using these steps:
     $ ./meteor --help
     ```
 
-0. **Ready to Go!**
+    > **Note for Windows (PowerShell):**
+    >
+    > * In PowerShell, use `.\meteor` (not `./meteor`).
+    > * Meteor may need `7z.exe` available in your `PATH` to download/extract binaries (dev_bundle).
+    >   * Verify: `where.exe 7z`
+    >   * If missing, install 7-Zip and ensure it is on your PATH (for example via `choco install 7zip -y` or `scoop install 7zip`).
+
+
+3. **Ready to Go!**
 
     Your local Meteor checkout is now ready to use!  You can use this `./meteor`
     anywhere you would normally call the system `meteor`.  For example,:
@@ -43,12 +51,47 @@ can run Meteor directly from a Git checkout using these steps:
     $ /path/to/meteor-checkout/meteor run
     ```
 
-    > _Tip:_ Consider making an easy-to-run alias for frequent use:
+    > _Tip 1:_ Consider making an easy-to-run alias for frequent use:
     >
     >     alias mymeteor=/path/to-meteor-checkout/meteor
     >
     > This allows the use of `mymeteor` in place of `meteor`.  To persist this
     > across shell logouts, simply add it to `~/.bashrc` or `.zshrc`.
+
+    > _Tip 2:_ When working with meteor tool, it may be helpful to use the debugger to check what's happening. You can do this using the following flag:
+    >
+    >        TOOL_NODE_FLAGS="--inspect-brk" mymeteor
+    >
+    > Then you can use the chrome debugger inside `chrome://inspect`.
+
+### Testing a fork branch
+
+When reviewing a pull request or testing changes from a contributor's fork, use the `checkout-pr.js` script to set up a local branch automatically:
+
+```sh
+# From a PR URL (requires gh CLI or falls back to GitHub API via curl)
+$ npm run checkout:pr -- https://github.com/meteor/meteor/pull/<PR-number>
+
+# From a user:branch shorthand
+$ npm run checkout:pr -- <user>:<branch>
+
+# From a full fork repo URL and branch name (HTTPS)
+$ npm run checkout:pr -- <fork-repo-url> <branch>
+
+# From a full fork repo URL and branch name (SSH)
+$ npm run checkout:pr -- git@github.com:<user>/<repo>.git <branch>
+```
+
+The script will:
+
+1. Add the fork as a git remote (named after the fork owner) if not already present
+2. Fetch the target branch
+3. Create (or update) a local branch named `fork/<owner>/<branch>`
+4. Print instructions for switching back to your previous branch
+
+For upstream PRs (branches on `meteor/meteor` itself), the script detects the existing `origin` remote and checks out the branch directly without the `fork/` prefix.
+
+If you run the script again for the same fork branch, it will fetch the latest changes and update the local branch.
 
 ### Notes when running from a checkout
 
@@ -65,6 +108,7 @@ When `meteor` is run from a checkout, a `dev_bundle` is automatically downloaded
 * Node.js version
 * npm version
 * MongoDB version
+* TypeScript version
 * Packages [used by `meteor-tool`](scripts/dev-bundle-tool-package.js)
 * Packages [used by the server bundle](scripts/dev-bundle-server-package.js)
 
@@ -94,101 +138,122 @@ This will generate a new tarball (`dev_bundle_<Platform>_<arch>_<version>.tar.gz
 
 ### Submitting "Dev Bundle" Pull Requests
 
-It's important to note that while `dev_bundle` pull requests are accepted/reviewed, a new `dev_bundle` can only be published to MDG's Meteor infrastructure by an MDG staff member. This means that the build tool and package tests of submitted `dev_bundle` pull requests will always initially fail (since the new `dev_bundle` hasn't yet been built/published by MDG, which means it can't be downloaded by Meteor's continuous integration environment).
+It's important to note that while `dev_bundle` pull requests are accepted/reviewed, a new `dev_bundle` can only be published to Meteor Software's Meteor infrastructure by a Meteor Software staff member. This means that the build tool and package tests of submitted `dev_bundle` pull requests will always initially fail (since the new `dev_bundle` hasn't yet been built/published by Meteor Software, which means it can't be downloaded by Meteor's continuous integration environment).
 
-Pull requests that contain `dev_bundle` changes will be noted by repo collaborators, and a request to have a new `dev_bundle` built/published will be forwarded to MDG.
+Pull requests that contain `dev_bundle` changes will be noted by repo collaborators, and a request to have a new `dev_bundle` built/published will be forwarded to Meteor Software.
 
 ## Additional documentation
 
 The Meteor core is best documented within the code itself, however, many components also have a `README.md` in their respective directories.
 
-Some compartmentalized portions of Meteor are broken into packages ([see a list of packages](packages/)) and they almost all have a `README.md` within their directory.  For example, [`ddp`](packages/ddp/README.md), [`ecmascript`](packages/ecmascript/README.md) and [`tinytest`](packages/tinytest/README.md).
+Some compartmentalized portions of Meteor are broken into packages ([see a list of packages](packages/)) and almost all of them have a `README.md` within their directory.  For example, [`ddp`](packages/ddp/README.md), [`ecmascript`](packages/ecmascript/README.md) and [`tinytest`](packages/tinytest/README.md).
 
 For the rest, try looking nearby for a `README.md`.  For example, [`isobuild`](tools/isobuild/README.md) or [`cordova`](tools/cordova/README.md).
 
 ## Tests
 
-### Test against the local meteor copy
+When running tests that use `./meteor`, be sure to run them against the checked-out copy of Meteor instead of the globally-installed version. This ensures tests run against your local development version.
 
-When running any of tests, be sure run them against the checked-out copy of Meteor instead of
-the globally-installed version.  This means ensuring that the command is `path-to-meteor-checkout/meteor` and not just `meteor`.
+The repository has four test layers, each covering a different scope:
 
-This is important so that tests are run against the version in development and not the stable (installed) Meteor release.
+| Command | Layer | Scope |
+|---------|-------|-------|
+| `npm run test:unit` | **Unit** (Jest) | Pure logic in `tools/`, `scripts/`, and helpers: fast, no Meteor runtime needed |
+| `npm run test:e2e` | **E2E** (Jest + Playwright) | Bundler integration and skeleton apps: creates real Meteor projects, launches a browser |
+| `./meteor self-test` | **Self-test** (custom) | Meteor CLI tool itself, spawns sandboxed Meteor processes to verify commands end-to-end |
+| `./meteor test-packages` | **Package** (TinyTest) | Atmosphere packages in `packages/`, runs inside a Meteor app with the full reactive runtime |
 
-### Running tests on Meteor core
+### Unit tests (Jest)
 
-When you are working with code in the core Meteor packages, you will want to make sure you run the
-full test-suite (including the tests you added) to ensure you haven't broken anything in Meteor. The
-`test-packages` command will do just that for you:
+Unit tests cover pure helpers, scripts, and tool logic that does not require the Meteor runtime. They use [Jest](https://jestjs.io/) configured in `tools/unit-tests/`, targeting `tools/**/*.test.js` and `scripts/**/*.test.js`.
 
-    ./meteor test-packages
+```sh
+# Install dependencies (first time)
+npm run install:unit
 
-Exactly in the same way that [`test-packages` works in standalone Meteor apps](https://guide.meteor.com/writing-atmosphere-packages.html#testing), the `test-packages` command will start up a Meteor app with [TinyTest](./packages/tinytest/README.md).  To view the results, just connect to `http://localhost:3000`.
+# Run all unit tests
+npm run test:unit
 
-#### Running specific tests
+# Run a specific test file
+npm run test:unit -- tools/path/to/file.test.js
 
-Specific package tests can be run by passing a `<package name>` or `<package path>` to the `test-packages` command. For example, to run `mongo` tests, it's possible to run:
+# Run tests matching a name pattern
+npm run test:unit -- -t "my test name"
+```
 
-    ./meteor test-packages mongo
+Place test files next to the module they test using the `*.test.js` naming convention. Jest will pick them up automatically.
 
-For more fine-grained control, if you're interested in running only the specific tests that relate to the functionality you're working on, you can filter individual tests by using the `TINYTEST_FILTER` environment variable (which supports regex's). For example, to run only the package tests that verify `new Mongo.Collection` behavior, try:
+### E2E tests (Jest + Playwright)
 
-    TINYTEST_FILTER="collection - call new Mongo.Collection" ./meteor test-packages
+End-to-end tests in `tools/e2e-tests/` validate that Meteor skeletons and bundler integrations work correctly. They create real Meteor apps, start dev servers, and assert behavior in a headless Chromium browser.
 
+```sh
+# Install dependencies (first time)
+npm run install:e2e
 
-### Running Meteor Tool self-tests
+# Run all E2E tests
+npm run test:e2e
 
-While TinyTest and the `test-packages` command can be used to test internal Meteor packages, they cannot be used to test the Meteor Tool itself. The Meteor Tool is a node app that uses a home-grown "self test" system.
+# Run a specific suite
+npm run test:e2e -- -t="React"
+```
 
-#### Listing available tests
+Each test has a corresponding app fixture in `tools/e2e-tests/apps/`. See that directory for examples when adding new E2E tests.
 
-To see a list of the tests which are included in the self-test system, list them with the `--list` option:
+### Self-tests (Meteor tool)
 
-    ./meteor self-test --list
+The Meteor CLI has its own "self-test" framework that spawns sandboxed Meteor processes. It tests commands like `create`, `build`, `deploy`, and `publish`.
 
-#### Running specific tests
+```sh
+# List all self-tests
+./meteor self-test --list
 
-The self-test commands support a regular-expression syntax in order to specific/search for specific tests.  For example, to search for tests starting with `a` or `b`, it's possible to run:
+# Run all self-tests
+./meteor self-test
 
-    ./meteor self-test "^[a-b]" --list
+# Run tests matching a regex
+./meteor self-test "^[a-b]"
 
-Simply remove the `--list` flag to actually run the matching tests.
+# Exclude tests matching a regex
+./meteor self-test --exclude "^[a-b]"
 
-#### Excluding specific tests
+# Skip retries during development
+./meteor self-test --retries 0
+```
 
-In a similar way to the method of specifying which tests TO run, there is a way to specify which tests should NOT run.  Again, using regular-expressions, this command will NOT list any tests which start with `a` or `b`:
+### Package tests (TinyTest)
 
-    ./meteor self-test --exclude "^[a-b]" --list
+When working with core Atmosphere packages, use `test-packages` to run their tests via [TinyTest](./packages/tinytest/README.md). This starts a Meteor app, view results at `http://localhost:3000`.
 
-Simply remove the `--list` flag to actually run the matching tests.
+```sh
+# Test all packages
+./meteor test-packages
 
-#### More reading
+# Test a specific package
+./meteor test-packages mongo
 
-For even more details on how to run Meteor Tool "self tests", please refer to the [Testing section of the Meteor Tool README](https://github.com/meteor/meteor/blob/master/tools/README.md#testing).
+# Filter by test name (supports regex), using --filter or -f
+./meteor test-packages --filter "collection - call new Mongo.Collection"
+
+# Equivalent using the environment variable
+TINYTEST_FILTER="collection - call new Mongo.Collection" ./meteor test-packages
+```
+
+For headless console output:
+
+```sh
+PUPPETEER_DOWNLOAD_PATH=~/.npm/chromium ./packages/test-in-console/run.sh
+```
 
 ### Continuous integration
 
-Any time a pull-request is submitted or a commit is pushed directly to the `devel` branch, continuous integration tests will be started automatically by the CI server.  These are run by [Circle CI](https://circleci.com/) and defined in the [`circle.yml` file](./circle.yml).  Even more specifically, the tests to run and the containers to run them under are defined in the [`/scripts/ci.sh`](scripts/ci.sh) script, which is a script which can run locally to replicate the exact tests.
+Any time a pull-request is submitted or a commit is pushed directly to the `devel` branch, continuous integration tests will be started automatically by the CI server.  The tests to run and the containers to run them under are defined in the [`/scripts/ci.sh`](scripts/ci.sh) script, which is a script which can run locally to replicate the exact tests.
 
 Not every test which is defined in a test spec is actually ran by the CI server.  Some tests are simply too long-running and some tests are just no longer relevant.  As one particular example, there is a suite of very slow tests grouped into a `slow` designator within the test framework.  These can be executed by adding the `--slow` option to the `self-test` command.
 
 > Please Note: Windows
 >
 > There is not currently a continuous integration system setup for Windows.  Additionally, not all tests are known to work on Windows.  If you're able to take time to improve those tests, it would be greatly appreciated.  Currently, there isn't an official list of known tests which do not run on Windows, but a PR to note those here and get them fixed would be ideal!
-
-#### Running your own CircleCI
-
-Since Meteor is a free, open-source project, you can run tests in the context of your own CircleCI account at no cost (up to the maximum number of containers allowed by them) during development and prior to submitting a pull-request.  For some, this may be quicker or more convenient than running tests on their own workstation.  As an added advantage, when your tests are "green", that status will be immediately shown (as passing) when a pull-request is opened with the official Meteor repository.
-
-To enable CircleCI for your development:
-
-1. Make sure you have an account with [CircleCI](https://circleci.com)
-0. Make sure you have [forked](https://help.github.com/articles/fork-a-repo/) [Meteor](https://github.com/meteor/meteor) into your own GitHub account.
-0. Go to the [Add Projects](https://circleci.com/add-projects) page on CircleCI.
-0. On the left, click on your GitHub username.
-0. On the right, find `meteor`
-0. Click on the "Build project" button next to `meteor`.
-0. Your build will start automatically!
 
 ## Code style
 
@@ -201,9 +266,101 @@ To enable CircleCI for your development:
 
 ## Commit messages
 
-Good commit messages are very important and you should make sure to explain what is changing and why.  The commit message should include:
+Good commit messages are very important and you should make sure to explain what is changing and why. The commit message should include:
 
 * A short and helpful commit title (maximum 80 characters).
 * A commit description which clearly explains the change if it's not super-obvious by the title.  Some description always helps!
 * Reference related issues and pull-requests by number in the description body (e.g. "#9999").
 * Add "Fixes" before the issue number if the addition of that commit fully resolves the issue.
+
+## Release Process
+
+Meteor releases follow a lifecycle: **beta** -> **RC (release candidate)** -> **official**. Releases are prepared on `release-<VERSION>` branches (e.g., `release-3.4.1`) and compared against the `devel` branch.
+
+Three AI skills support this process. They are defined as markdown files under `.github/skills/` and can be used by any AI coding assistant that supports reading project context. Trigger them from any session on a release branch.
+
+### AI Skills for Releases
+
+| Skill | Purpose | Skill File |
+|-------|---------|------------|
+| [changelog](.github/skills/changelog/SKILL.md) | Generate and update changelog entries from merged PRs | `v3-docs/docs/generators/changelog/versions/` |
+| [version-bump](.github/skills/version-bump/SKILL.md) | Bump package versions for beta, RC, or official releases | `packages/*/package.js`, release config files |
+| [docs-gap](.github/skills/docs-gap/SKILL.md) | Identify missing user-facing documentation for release changes | Produces a gap report in `docs/plans/` |
+
+### Preparing a Beta Release
+
+A beta is the first prerelease for a new version. It bumps all changed packages with a `-betaXXX.0` suffix.
+
+**Step 1 — Update the changelog:**
+
+```
+Update the changelog for 3.4.1 from the current branch compared to devel.
+Check all merged PRs and complete with the missing fixes and features.
+```
+
+**Step 2 — Bump versions:**
+
+```
+Apply the version-bump skill for a beta.0 release on this branch against devel.
+```
+
+Claude will analyze each changed package, determine patch vs minor bumps based on the diff, present a table with reasons, and apply after confirmation.
+
+**Step 3 — Check for documentation gaps:**
+
+```
+Run the docs-gap skill to analyze what documentation is missing for this release.
+```
+
+### Preparing an RC Release
+
+An RC transitions beta versions to release candidate. The base version stays the same, only the suffix changes.
+
+**Step 1 — Update the changelog** (same as beta, catches any new PRs merged since the last beta).
+
+**Step 2 — Bump versions:**
+
+```
+Apply the version-bump skill to move from beta to RC on this branch.
+```
+
+### Preparing an Official Release
+
+An official release strips all prerelease suffixes and updates the release config and npm installer.
+
+**Step 1 — Finalize the changelog:**
+
+```
+Finalize the changelog for 3.4.1 — set the release date and replace any
+RC version references with final versions.
+```
+
+**Step 2 — Bump versions:**
+
+```
+Apply the version-bump skill for an official release on this branch.
+```
+
+This is a two-commit process: packages and release config first, npm installer second.
+
+**Step 3 — Verify documentation coverage:**
+
+```
+Run the docs-gap skill and apply any missing documentation for this release.
+```
+
+### Other Useful Prompts
+
+```
+# Separate Rspack improvements from other changes in the changelog
+Update the changelog separating Rspack improvements from other contributions.
+
+# Override a specific package bump magnitude
+The roles package should be a minor bump because it adds getUserIdsInRoleAsync.
+
+# Generate the gap report without applying fixes
+Run the docs-gap skill to produce a gap report only — don't write any docs yet.
+
+# Check which packages changed vs devel
+What packages have changed on this branch compared to devel?
+```

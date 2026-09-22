@@ -1,28 +1,21 @@
 Package.describe({
   summary: "Common code for OAuth-based services",
-  version: "1.2.8"
+  version: '3.0.4',
 });
 
 Package.onUse(api => {
-  api.use('check');
-  api.use('ecmascript');
+  api.use(['check', 'ecmascript', 'localstorage', 'url']);
 
-  api.use('routepolicy', 'server');
-  api.use('webapp', 'server');
-  api.use('mongo', 'server');
+  api.use(['routepolicy', 'webapp', 'mongo', 'service-configuration', 'logging'], 'server');
 
-  api.use('reload', 'client');
-  api.use('base64', 'client');
+  api.use(['reload', 'base64'], 'client');
 
-  api.use(['service-configuration', 'logging'], 'server');
+  api.use('oauth-encryption', 'server', { weak: true });
+  api.use('fetch', 'server');
 
-  api.use('oauth-encryption', 'server', {weak: true});
-
-  api.use('localstorage');
-  api.use('url');
 
   api.export('OAuth');
-  api.export('OAuthTest', 'server', {testOnly: true});
+  api.export('OAuthTest', 'server', { testOnly: true });
 
   api.addFiles('oauth_client.js', 'web');
   api.addFiles('oauth_browser.js', 'web.browser');
@@ -41,12 +34,11 @@ Package.onUse(api => {
   ], 'client');
 
   api.addFiles('oauth_common.js');
-
-  // XXX COMPAT WITH 0.8.0
-  api.export('Oauth');
-  api.addFiles('deprecated.js', ['client', 'server']);
 });
 
+Npm.depends({
+  'body-parser': '1.20.3',
+});
 
 Package.onTest(api => {
   api.use('tinytest');
@@ -57,5 +49,5 @@ Package.onTest(api => {
 });
 
 Cordova.depends({
-  'cordova-plugin-inappbrowser': '1.7.1'
+  'cordova-plugin-inappbrowser': '5.0.0'
 });

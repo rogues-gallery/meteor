@@ -1,14 +1,12 @@
 Package.describe({
-  summary: "Blaze configuration templates for Google OAuth.",
-  version: "1.0.1",
+  summary: 'Blaze configuration templates for Google OAuth.',
+  version: '1.1.0',
 });
 
 Package.onUse(api => {
   api.use('ecmascript', 'client');
-  api.use('templating@1.2.13', 'client');
+  api.use('templating@1.4.2', 'client');
 
   api.addFiles('google_login_button.css', 'client');
-  api.addFiles(
-    ['google_configure.html', 'google_configure.js'],
-    'client');
+  api.addFiles(['google_configure.html', 'google_configure.js'], 'client');
 });

@@ -1,7 +1,7 @@
 import http from 'http';
 import { OAuth1Binding } from './oauth1_binding';
 
-const testPendingCredential = test => {
+const testPendingCredential = async (test, method) => {
   const twitterfooId = Random.id();
   const twitterfooName = `nickname${Random.id()}`;
   const twitterfooAccessToken = Random.id();
@@ -17,17 +17,17 @@ const testPendingCredential = test => {
     authenticate: "https://example.com/oauth/authenticate"
   };
 
-  OAuth1Binding.prototype.prepareRequestToken = () => {};
-  OAuth1Binding.prototype.prepareAccessToken = function() {
+  OAuth1Binding.prototype.prepareRequestToken = async () => {};
+  OAuth1Binding.prototype.prepareAccessToken = async function() {
     this.accessToken = twitterfooAccessToken;
     this.accessTokenSecret = twitterfooAccessTokenSecret;
   };
 
-  ServiceConfiguration.configurations.insert({service: serviceName});
+  await ServiceConfiguration.configurations.insertAsync({service: serviceName});
 
   try {
     // register a fake login service
-    OAuth.registerService(serviceName, 1, urls, query => ({
+    OAuth.registerService(serviceName, 1, urls, async query => ({
       serviceData: {
         id: twitterfooId,
         screenName: twitterfooName,
@@ -40,17 +40,25 @@ const testPendingCredential = test => {
     }));
 
     // simulate logging in using twitterfoo
-    Oauth._storeRequestToken(credentialToken, twitterfooAccessToken);
+    await OAuth._storeRequestToken(credentialToken, twitterfooAccessToken);
 
     const req = {
-      method: "POST",
-      url: `/_oauth/${serviceName}`,
-      query: {
-        state: OAuth._generateState('popup', credentialToken),
-        oauth_token: twitterfooAccessToken,
-        only_credential_secret_for_test: 1
-      }
+      method,
+      url: `/_oauth/${serviceName}`
     };
+
+    const payload = {
+      state: OAuth._generateState('popup', credentialToken),
+      oauth_token: twitterfooAccessToken,
+      only_credential_secret_for_test: 1
+    };
+
+    if (method === 'GET') {
+      req.query = payload;
+    } else {
+      req.body = payload;
+    }
+
     const res = new http.ServerResponse(req);
     const write = res.write;
     const end = res.end;
@@ -63,11 +71,10 @@ const testPendingCredential = test => {
       respData += args[0];
       return end.apply(this, arguments);
     };
-    OAuthTest.middleware(req, res);
+    await OAuthTest.middleware(req, res);
     const credentialSecret = respData;
-
     // Test that the result for the token is available
-    let result = OAuth._retrievePendingCredential(credentialToken,
+    let result = await OAuth._retrievePendingCredential(credentialToken,
                                                   credentialSecret);
     const serviceData = OAuth.openSecrets(result.serviceData);
     test.equal(result.serviceName, serviceName);
@@ -78,7 +85,7 @@ const testPendingCredential = test => {
     test.equal(result.options.option1, twitterOption1);
 
     // Test that pending credential is removed after being retrieved
-    result = OAuth._retrievePendingCredential(credentialToken);
+    result = await OAuth._retrievePendingCredential(credentialToken);
     test.isUndefined(result);
 
   } finally {
@@ -86,38 +93,40 @@ const testPendingCredential = test => {
   }
 };
 
-Tinytest.add("oauth1 - pendingCredential is stored and can be retrieved (without oauth encryption)", test => {
+Tinytest.addAsync("oauth1 - pendingCredential is stored and can be retrieved (without oauth encryption)", async test => {
   OAuthEncryption.loadKey(null);
-  testPendingCredential(test);
+  await testPendingCredential(test, "GET");
+  await testPendingCredential(test, "POST");
 });
 
-Tinytest.add("oauth1 - pendingCredential is stored and can be retrieved (with oauth encryption)", test => {
+Tinytest.addAsync("oauth1 - pendingCredential is stored and can be retrieved (with oauth encryption)", async test => {
   try {
     OAuthEncryption.loadKey(Buffer.from([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]).toString("base64"));
-    testPendingCredential(test);
+    await testPendingCredential(test, "GET");
+    await testPendingCredential(test, "POST");
   } finally {
     OAuthEncryption.loadKey(null);
   }
 });
 
-Tinytest.add("oauth1 - duplicate key for request token", test => {
+Tinytest.addAsync("oauth1 - duplicate key for request token", async test => {
   const key = Random.id();
   const token = Random.id();
   const secret = Random.id();
-  OAuth._storeRequestToken(key, token, secret);
+  await OAuth._storeRequestToken(key, token, secret);
   const newToken = Random.id();
   const newSecret = Random.id();
-  OAuth._storeRequestToken(key, newToken, newSecret);
-  const result = OAuth._retrieveRequestToken(key);
+  await OAuth._storeRequestToken(key, newToken, newSecret);
+  const result = await  OAuth._retrieveRequestToken(key);
   test.equal(result.requestToken, newToken);
   test.equal(result.requestTokenSecret, newSecret);
 });
 
-Tinytest.add("oauth1 - null, undefined key for request token", test => {
+Tinytest.addAsync("oauth1 - null, undefined key for request token", async test => {
   const token = Random.id();
   const secret = Random.id();
-  test.throws(() => OAuth._storeRequestToken(null, token, secret));
-  test.throws(() => OAuth._storeRequestToken(undefined, token, secret));
+  await test.throwsAsync(() => OAuth._storeRequestToken(null, token, secret));
+  await test.throwsAsync(() => OAuth._storeRequestToken(undefined, token, secret));
 });
 
 Tinytest.add("oauth1 - signature is built correctly", test => {
@@ -158,6 +167,38 @@ Tinytest.add("oauth1 - headers are encoded correctly", test => {
       specialCharacters: "%60%21%40%23%24%25%5E%26%2A%28%29",
     }
   );
+});
+
+Tinytest.add("oauth1 - _queryParamsWithAuthTokenUrl adds oauth_token to URL", test => {
+  const mockBinding = { requestToken: 'my-token' };
+  const result = OAuth._queryParamsWithAuthTokenUrl(
+    'https://provider.com/oauth?existing=1', mockBinding, {}, []
+  );
+  const parsed = new URL(result);
+  test.equal(parsed.searchParams.get('oauth_token'), 'my-token');
+  test.equal(parsed.searchParams.get('existing'), '1');
+});
+
+Tinytest.add("oauth1 - _queryParamsWithAuthTokenUrl merges whitelisted query params", test => {
+  const mockBinding = { requestToken: 'tok' };
+  const result = OAuth._queryParamsWithAuthTokenUrl(
+    'https://provider.com/oauth', mockBinding,
+    { query: { screen_name: 'user1', secret: 'x' } },
+    ['screen_name']
+  );
+  const parsed = new URL(result);
+  test.equal(parsed.searchParams.get('screen_name'), 'user1');
+  test.isNull(parsed.searchParams.get('secret'));
+});
+
+Tinytest.add("oauth1 - _queryParamsWithAuthTokenUrl excludes non-whitelisted params", test => {
+  const mockBinding = { requestToken: 'tok' };
+  const result = OAuth._queryParamsWithAuthTokenUrl(
+    'https://provider.com/oauth', mockBinding,
+    { query: { not_allowed: 'val' } }, []
+  );
+  const parsed = new URL(result);
+  test.isNull(parsed.searchParams.get('not_allowed'));
 });
 
 Tinytest.add("oauth1 - auth header string is built correctly", test => {

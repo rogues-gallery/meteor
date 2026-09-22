@@ -1,4 +1,4 @@
-import url from 'url';
+import bodyParser from 'body-parser';
 
 OAuth = {};
 OAuthTest = {};
@@ -13,22 +13,23 @@ const registeredServices = {};
 OAuth._requestHandlers = {};
 
 
-// Register a handler for an OAuth service. The handler will be called
-// when we get an incoming http request on /_oauth/{serviceName}. This
-// handler should use that information to fetch data about the user
-// logging in.
-//
-// @param name {String} e.g. "google", "facebook"
-// @param version {Number} OAuth version (1 or 2)
-// @param urls   For OAuth1 only, specify the service's urls
-// @param handleOauthRequest {Function(oauthBinding|query)}
-//   - (For OAuth1 only) oauthBinding {OAuth1Binding} bound to the appropriate provider
-//   - (For OAuth2 only) query {Object} parameters passed in query string
-//   - return value is:
-//     - {serviceData:, (optional options:)} where serviceData should end
-//       up in the user's services[name] field
-//     - `null` if the user declined to give permissions
-//
+/**
+/* Register a handler for an OAuth service. The handler will be called
+/* when we get an incoming http request on /_oauth/{serviceName}. This
+/* handler should use that information to fetch data about the user
+/* logging in.
+/*
+/* @param name {String} e.g. "google", "facebook"
+/* @param version {Number} OAuth version (1 or 2)
+/* @param urls   For OAuth1 only, specify the service's urls
+/* @param handleOauthRequest {Function(oauthBinding|query)}
+/*   - (For OAuth1 only) oauthBinding {OAuth1Binding} bound to the appropriate provider
+/*   - (For OAuth2 only) query {Object} parameters passed in query string
+/*   - return value is:
+/*     - {serviceData:, (optional options:)} where serviceData should end
+/*       up in the user's services[name] field
+/*     - `null` if the user declined to give permissions
+*/
 OAuth.registerService = (name, version, urls, handleOauthRequest) => {
   if (registeredServices[name])
     throw new Error(`Already registered the ${name} OAuth service`);
@@ -135,7 +136,9 @@ OAuth._checkRedirectUrlOrigin = redirectUrl => {
   );
 };
 
-const middleware = (req, res, next) => {
+const middleware = async (req, res, next) => {
+  let requestData;
+
   // Make sure to catch any exceptions because otherwise we'd crash
   // the runner
   try {
@@ -153,12 +156,18 @@ const middleware = (req, res, next) => {
       throw new Error(`Unexpected OAuth service ${serviceName}`);
 
     // Make sure we're configured
-    ensureConfigured(serviceName);
+    await ensureConfigured(serviceName);
 
     const handler = OAuth._requestHandlers[service.version];
     if (!handler)
       throw new Error(`Unexpected OAuth version ${service.version}`);
-    handler(service, req.query, res);
+
+    if (req.method === 'GET') {
+      requestData = req.query;
+    } else {
+      requestData = req.body;
+    }
+    await handler(service, requestData, res);
   } catch (err) {
     // if we got thrown an error, save it off, it will get passed to
     // the appropriate login call (if any) and reported there.
@@ -167,9 +176,9 @@ const middleware = (req, res, next) => {
     // is still open at this point, ignoring the 'close' or 'redirect'
     // we were passed. But then the developer wouldn't be able to
     // style the error or react to it in any way.
-    if (req.query.state && err instanceof Error) {
+    if (requestData?.state && err instanceof Error) {
       try { // catch any exceptions to avoid crashing runner
-        OAuth._storePendingCredential(OAuth._credentialTokenFromQuery(req.query), err);
+        await OAuth._storePendingCredential(OAuth._credentialTokenFromQuery(requestData), err);
       } catch (err) {
         // Ignore the error and just give up. If we failed to store the
         // error, then the login will just fail with a generic error.
@@ -183,9 +192,9 @@ const middleware = (req, res, next) => {
     // think to check server logs (we hope?)
     // Catch errors because any exception here will crash the runner.
     try {
-      OAuth._endOfLoginResponse(res, {
-        query: req.query,
-        loginStyle: OAuth._loginStyleFromQuery(req.query),
+      await OAuth._endOfLoginResponse(res, {
+        query: requestData,
+        loginStyle: OAuth._loginStyleFromQuery(requestData),
         error: err
       });
     } catch (err) {
@@ -196,9 +205,13 @@ const middleware = (req, res, next) => {
 };
 
 // Listen to incoming OAuth http requests
-WebApp.connectHandlers.use(middleware);
+WebApp.handlers.use('/_oauth', bodyParser.json());
+WebApp.handlers.use('/_oauth', bodyParser.urlencoded({ extended: false }));
+WebApp.handlers.use(middleware);
 
 OAuthTest.middleware = middleware;
+
+OAuthTest.registeredServices = registeredServices;
 
 // Handle /_oauth/* paths and extract the service name.
 //
@@ -225,11 +238,14 @@ const oauthServiceName = req => {
 };
 
 // Make sure we're configured
-const ensureConfigured = serviceName => {
-  if (!ServiceConfiguration.configurations.findOne({service: serviceName})) {
-    throw new ServiceConfiguration.ConfigError();
-  }
-};
+const ensureConfigured =
+  async serviceName => {
+    const config =
+      await ServiceConfiguration.configurations.findOneAsync({ service: serviceName });
+    if (!config) {
+      throw new ServiceConfiguration.ConfigError();
+    }
+  };
 
 const isSafe = value => {
   // This matches strings generated by `Random.secret` and
@@ -239,7 +255,7 @@ const isSafe = value => {
 };
 
 // Internal: used by the oauth1 and oauth2 packages
-OAuth._renderOauthResults = (res, query, credentialSecret) => {
+OAuth._renderOauthResults = async (res, query, credentialSecret) => {
   // For tests, we support the `only_credential_secret_for_test`
   // parameter, which just returns the credential secret without any
   // surrounding HTML. (The test needs to be able to easily grab the
@@ -270,18 +286,23 @@ OAuth._renderOauthResults = (res, query, credentialSecret) => {
       }
     }
 
-    OAuth._endOfLoginResponse(res, details);
+    await OAuth._endOfLoginResponse(res, details);
   }
 };
 
+const getAsset = (name) => {
+  return new Promise((resolve, reject) => Assets.getTextAsync(
+    `${name}.html`,
+    (err, data) => err ? reject(err) : resolve(data)))
+}
 // This "template" (not a real Spacebars template, just an HTML file
 // with some ##PLACEHOLDER##s) communicates the credential secret back
 // to the main window and then closes the popup.
-OAuth._endOfPopupResponseTemplate = Assets.getText(
-  "end_of_popup_response.html");
+OAuth._endOfPopupResponseTemplate =
+  async () => await getAsset('end_of_popup_response')
 
-OAuth._endOfRedirectResponseTemplate = Assets.getText(
-  "end_of_redirect_response.html");
+OAuth._endOfRedirectResponseTemplate =
+  async () => await getAsset('end_of_redirect_response')
 
 // Renders the end of login response template into some HTML and JavaScript
 // that closes the popup or redirects at the end of the OAuth flow.
@@ -294,7 +315,7 @@ OAuth._endOfRedirectResponseTemplate = Assets.getText(
 //   - redirectUrl
 //   - isCordova (boolean)
 //
-const renderEndOfLoginResponse = options => {
+const renderEndOfLoginResponse = async options => {
   // It would be nice to use Blaze here, but it's a little tricky
   // because our mustaches would be inside a <script> tag, and Blaze
   // would treat the <script> tag contents as text (e.g. encode '&' as
@@ -326,13 +347,12 @@ const renderEndOfLoginResponse = options => {
 
   let template;
   if (options.loginStyle === 'popup') {
-    template = OAuth._endOfPopupResponseTemplate;
+    template = await OAuth._endOfPopupResponseTemplate();
   } else if (options.loginStyle === 'redirect') {
-    template = OAuth._endOfRedirectResponseTemplate;
+    template = await OAuth._endOfRedirectResponseTemplate();
   } else {
     throw new Error(`invalid loginStyle: ${options.loginStyle}`);
   }
-
   const result = template.replace(/##CONFIG##/, JSON.stringify(config))
     .replace(
       /##ROOT_URL_PATH_PREFIX##/, __meteor_runtime_config__.ROOT_URL_PATH_PREFIX
@@ -346,7 +366,7 @@ const renderEndOfLoginResponse = options => {
 // to the OAuth server and authorized this app, we communicate the
 // credentialToken and credentialSecret to the main window. The main
 // window must provide both these values to the DDP `login` method to
-// authenticate its DDP connection. After communicating these vaues to
+// authenticate its DDP connection. After communicating these values to
 // the main window, we close the popup.
 //
 // We export this function so that developers can override this
@@ -372,14 +392,16 @@ const renderEndOfLoginResponse = options => {
 //        so shouldn't be trusted for security decisions or included in
 //        the response without sanitizing it first. Only one of `error`
 //        or `credentials` should be set.
-OAuth._endOfLoginResponse = (res, details) => {
+OAuth._endOfLoginResponse = async (res, details) => {
   res.writeHead(200, {'Content-Type': 'text/html'});
 
   let redirectUrl;
   if (details.loginStyle === 'redirect') {
     redirectUrl = OAuth._stateFromQuery(details.query).redirectUrl;
     const appHost = Meteor.absoluteUrl();
-    if (OAuth._checkRedirectUrlOrigin(redirectUrl)) {
+    if (
+      !Meteor.settings?.packages?.oauth?.disableCheckRedirectUrlOrigin &&
+      OAuth._checkRedirectUrlOrigin(redirectUrl)) {
       details.error = `redirectUrl (${redirectUrl}` +
         `) is not on the same host as the app (${appHost})`;
       redirectUrl = appHost;
@@ -392,7 +414,7 @@ OAuth._endOfLoginResponse = (res, details) => {
     Log.warn("Error in OAuth Server: " +
              (details.error instanceof Error ?
               details.error.message : details.error));
-    res.end(renderEndOfLoginResponse({
+    res.end(await renderEndOfLoginResponse({
       loginStyle: details.loginStyle,
       setCredentialToken: false,
       redirectUrl,
@@ -404,7 +426,7 @@ OAuth._endOfLoginResponse = (res, details) => {
   // If we have a credentialSecret, report it back to the parent
   // window, with the corresponding credentialToken. The parent window
   // uses the credentialToken and credentialSecret to log in over DDP.
-  res.end(renderEndOfLoginResponse({
+  res.end(await renderEndOfLoginResponse({
     loginStyle: details.loginStyle,
     setCredentialToken: true,
     credentialToken: details.credentials.token,
@@ -458,4 +480,32 @@ OAuth.openSecrets = (serviceData, userId) => {
     result[key] = OAuth.openSecret(serviceData[key], userId)
   );
   return result;
+};
+
+OAuth._addValuesToQueryParams = (
+  values = {},
+  queryParams = new URLSearchParams()
+) => {
+  Object.entries(values).forEach(([key, value]) => {
+    queryParams.set(key, `${value}`);
+  });
+  return queryParams;
+};
+
+OAuth._fetch = async (
+  url,
+  method = 'GET',
+  { headers = {}, queryParams = {}, body, ...options } = {}
+) => {
+  const urlWithParams = new URL(url);
+
+  OAuth._addValuesToQueryParams(queryParams, urlWithParams.searchParams);
+
+  const requestOptions = {
+    method: method.toUpperCase(),
+    headers,
+    ...(body ? { body } : {}),
+    ...options,
+  };
+  return fetch(urlWithParams.toString(), requestOptions);
 };

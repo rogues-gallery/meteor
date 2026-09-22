@@ -1,6 +1,4 @@
 import path from 'path';
-import url from 'url';
-import Future from 'fibers/future';
 import postcss from 'postcss';
 import cssnano from 'cssnano';
 
@@ -14,7 +12,7 @@ const CssTools = {
    */
   parseCss(cssText, options = {}) {
     // This function previously used the `css-parse` npm package, which
-    // set the name of the css file being pased using  { source: 'filename' }.
+    // set the name of the css file being parsed using  { source: 'filename' }.
     // If included, we'll convert this to the `postcss` equivalent, to maintain
     // backwards compatibility.
     if (options.source) {
@@ -62,26 +60,24 @@ const CssTools = {
    * Minify the passed in CSS string.
    *
    * @param {string} cssText CSS string to minify.
-   * @return {String[]} Array containing the minified CSS.
+   * @return {Promise<String[]>} Array containing the minified CSS.
    */
   minifyCss(cssText) {
-    const f = new Future;
-    postcss([
-      cssnano({ safe: true }),
-    ]).process(cssText, {
-      from: void 0,
-    }).then(result => {
-      f.return(result.css);
-    }).catch(error => {
-      f.throw(error);
-    });
-    const minifiedCss = f.wait();
+    return CssTools.minifyCssAsync(cssText);
+  },
 
-    // Since this function has always returned an array, we'll wrap the
-    // minified css string in an array before returning, even though we're
-    // only ever returning one minified css string in that array (maintaining
-    // backwards compatibility).
-    return [minifiedCss];
+  /**
+   * Minify the passed in CSS string.
+   *
+   * @param {string} cssText CSS string to minify.
+   * @return {Promise<String[]>} Array containing the minified CSS.
+   */
+  async minifyCssAsync(cssText) {
+    return await postcss([cssnano({ safe: true })])
+      .process(cssText, {
+        from: void 0,
+      })
+      .then((result) => [result.css]);
   },
 
   /**
@@ -96,8 +92,13 @@ const CssTools = {
       if (! Array.isArray(rules)) {
         rules = [rules];
       }
-      return node =>
-        exclude ? !rules.includes(node.name) : rules.includes(node.name);
+      return node => {
+        // PostCSS AtRule nodes have `type: 'atrule'` and a descriptive name,
+        // e.g. 'import' or 'charset', while Comment nodes have type only.
+        const nodeMatchesRule = rules.includes(node.name || node.type);
+
+        return exclude ? !nodeMatchesRule : nodeMatchesRule;
+      }
     };
 
     // Simple concatenation of CSS files would break @import rules
@@ -182,6 +183,7 @@ if (typeof Profile !== 'undefined') {
     'parseCss',
     'stringifyCss',
     'minifyCss',
+    'minifyCssAsync',
     'mergeCssAsts',
     'rewriteCssUrls',
   ].forEach(funcName => {
@@ -233,25 +235,29 @@ const rewriteRules = (rules, mergedCssPath) => {
     while (parts = cssUrlRegex.exec(value)) {
       const oldCssUrl = parts[0];
       const quote = parts[1];
-      const resource = url.parse(parts[2]);
+      const cssUrlValue = parts[2];
 
       // We don't rewrite URLs starting with a protocol definition such as
       // http, https, or data, or those with network-path references
       // i.e. //img.domain.com/cat.gif
-      if (resource.protocol !== null ||
-          resource.href.startsWith('//') ||
-          resource.href.startsWith('#')) {
+      if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(cssUrlValue) ||
+          cssUrlValue.startsWith('//') ||
+          cssUrlValue.startsWith('#')) {
         continue;
       }
 
       // Rewrite relative paths (that refers to the internal application tree)
       // to absolute paths (addressable from the public build).
-      let absolutePath = isRelative(resource.path)
-        ? pathJoin(basePath, resource.path)
-        : resource.path;
+      const hashIndex = cssUrlValue.indexOf('#');
+      const hash = hashIndex >= 0 ? cssUrlValue.slice(hashIndex) : '';
+      const pathPart = hashIndex >= 0 ? cssUrlValue.slice(0, hashIndex) : cssUrlValue;
 
-      if (resource.hash) {
-        absolutePath += resource.hash;
+      let absolutePath = isRelative(pathPart)
+        ? pathJoin(basePath, pathPart)
+        : pathPart;
+
+      if (hash) {
+        absolutePath += hash;
       }
 
       // We used to finish the rewriting process at the absolute path step

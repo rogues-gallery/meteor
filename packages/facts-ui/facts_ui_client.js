@@ -1,4 +1,4 @@
-import { Facts, FACTS_COLLECTION, FACTS_PUBLICATION } from 'meteor/facts-base';
+import { Facts, FACTS_COLLECTION, FACTS_PUBLICATION } from "meteor/facts-base";
 
 Facts.server = new Mongo.Collection(FACTS_COLLECTION);
 
@@ -6,12 +6,11 @@ Template.serverFacts.helpers({
   factsByPackage: () => Facts.server.find(),
   facts: function () {
     const factArray = [];
-    _.each(this, function (value, name) {
-      if (name !== '_id')
-        factArray.push({name: name, value: value});
+    Object.entries(this).forEach(function ([name, value]) {
+      if (name !== "_id") factArray.push({ name: name, value: value });
     });
     return factArray;
-  }
+  },
 });
 
 // Subscribe when the template is first made, and unsubscribe when it

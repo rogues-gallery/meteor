@@ -45,8 +45,11 @@ OAuth._stateParam = (loginStyle, credentialToken, redirectUrl) => {
     isCordova: Meteor.isCordova
   };
 
-  if (loginStyle === 'redirect')
+  if (loginStyle === 'redirect' ||
+    (Meteor.settings?.public?.packages?.oauth?.setRedirectUrlWhenLoginStyleIsPopup && loginStyle === 'popup')
+  ) {
     state.redirectUrl = redirectUrl || ('' + window.location);
+  }
 
   // Encode base64 as not all login services URI-encode the state
   // parameter when they pass it back to us.
@@ -94,19 +97,20 @@ OAuth.getDataAfterRedirect = () => {
   };
 };
 
-// Launch an OAuth login flow.  For the popup login style, show the
-// popup.  For the redirect login style, save the credential token for
-// this login attempt in the reload migration data, and redirect to
-// the service for the login.
-//
-// options:
-//  loginService: "facebook", "google", etc.
-//  loginStyle: "popup" or "redirect"
-//  loginUrl: The URL at the login service provider to start the OAuth flow.
-//  credentialRequestCompleteCallback: for the popup flow, call when the popup
-//    is closed and we have the credential from the login service.
-//  credentialToken: our identifier for this login flow.
-//
+/**
+ * Launch an OAuth login flow.  For the popup login style, show the
+ * popup.  For the redirect login style, save the credential token for
+ * this login attempt in the reload migration data, and redirect to
+ * the service for the login.
+ *
+ * @param {Object} options
+ * @param {string} options.loginService "facebook", "google", etc.
+ * @param {string} options.loginStyle "popup" or "redirect"
+ * @param {string} options.loginUrl The URL at the login service provider to start the OAuth flow.
+ *  credentialRequestCompleteCallback: for the popup flow, call when the popup
+ *    is closed and we have the credential from the login service.
+ * @param {string} options.credentialToken our identifier for this login flow.
+ **/
 OAuth.launchLogin = options => {
   if (! options.loginService)
     throw new Error('loginService required');
@@ -121,16 +125,6 @@ OAuth.launchLogin = options => {
   } else {
     throw new Error('invalid login style');
   }
-};
-
-// XXX COMPAT WITH 0.7.0.1
-// Private interface but probably used by many oauth clients in atmosphere.
-OAuth.initiateLogin = (credentialToken, url, callback, dimensions) => {
-  OAuth.showPopup(
-    url,
-    callback.bind(null, credentialToken),
-    dimensions
-  );
 };
 
 // Called by the popup when the OAuth flow is completed, right before

@@ -9,7 +9,10 @@ import {
   createTarGzStream,
   getSettings,
   mkdtemp,
-} from '../fs/files.js';
+  changeTempDirStatus,
+  exists,
+  findGitCommitHash,
+} from '../fs/files';
 import { request } from '../utils/http-helpers.js';
 import buildmessage from '../utils/buildmessage.js';
 import {
@@ -17,11 +20,10 @@ import {
   doInteractivePasswordLogin,
   loggedInUsername,
   isLoggedIn,
-  maybePrintRegistrationLink,
 } from './auth.js';
 import { recordPackages } from './stats.js';
 import { Console } from '../console/console.js';
-import { Profile } from '../tool-env/profile.js';
+import { Profile } from '../tool-env/profile';
 
 function sleepForMilliseconds(millisecondsToWait) {
   return new Promise(function(resolve) {
@@ -33,8 +35,8 @@ const hasOwn = Object.prototype.hasOwnProperty;
 
 const CAPABILITIES = ['showDeployMessages', 'canTransferAuthorization'];
 
-// Make a synchronous RPC to the "classic" MDG deploy API. The deploy
-// API has the following contract:
+// Make a synchronous RPC to the "classic" Meteor Software deploy API. The
+// deploy API has the following contract:
 //
 // - Parameters are always sent in the query string.
 // - A tarball can be sent in the body (when deploying an app).
@@ -45,7 +47,7 @@ const CAPABILITIES = ['showDeployMessages', 'canTransferAuthorization'];
 //   provide a human-readable error message in the body.
 // - URLs are of the form "/[operation]/[site]".
 // - Body encodings are always utf8.
-// - Meteor Accounts auth is possible using first-party MDG cookies
+// - Meteor Accounts auth is possible using first-party Meteor Software cookies
 //   (rather than OAuth).
 //
 // Options include:
@@ -80,21 +82,25 @@ const CAPABILITIES = ['showDeployMessages', 'canTransferAuthorization'];
 //   derived from either a transport-level exception, the response
 //   body, or a generic 'try again later' message, as appropriate
 
-function deployRpc(options) {
+async function deployRpc(options) {
   options = Object.assign({}, options);
   options.headers = Object.assign({}, options.headers || {});
   if (options.headers.cookie) {
     throw new Error("sorry, can't combine cookie headers yet");
   }
-  options.qs = Object.assign({}, options.qs,
-    {capabilities: CAPABILITIES.slice()});
+  options.qs = Object.assign(
+    {},
+    options.qs,
+    { capabilities: CAPABILITIES.slice() },
+    options.deployWithTokenProps || {}
+  );
   // If we are waiting for deploy, we let Galaxy know so it can
   // use that information to send us the right deploy message response.
   if (options.waitForDeploy) {
     options.qs.capabilities.push('willPollVersionStatus');
   }
 
-  const deployURLBase = getDeployURL(options.site).await();
+  const deployURLBase = await getDeployURL(options.site);
 
   if (options.printDeployURL) {
     Console.info("Talking to Galaxy servers at " + deployURLBase);
@@ -109,7 +115,7 @@ function deployRpc(options) {
 
   // XXX: Reintroduce progress for upload
   try {
-    var result = request(Object.assign(options, {
+    var result = await request(Object.assign(options, {
       url: deployURLBase + '/' + options.operation +
         operand,
       method: options.method || 'GET',
@@ -187,13 +193,13 @@ function deployRpc(options) {
 //   accounts server but our authentication actually fails, then prompt
 //   the user to log in with a username and password and then resend the
 //   RPC.
-function authedRpc(options) {
+async function authedRpc(options) {
   var rpcOptions = Object.assign({}, options);
   var preflight = rpcOptions.preflight;
   delete rpcOptions.preflight;
 
   // Fetch auth info
-  var infoResult = deployRpc({
+  var infoResult = await deployRpc({
     operation: 'info',
     site: rpcOptions.site,
     expectPayload: [],
@@ -215,7 +221,7 @@ function authedRpc(options) {
 
     // Our authentication didn't validate, so prompt the user to log in
     // again, and resend the RPC if the login succeeds.
-    var username = Console.readLine({
+    var username = await Console.readLine({
       prompt: "Username: ",
       stream: process.stderr
     });
@@ -223,8 +229,8 @@ function authedRpc(options) {
       username: username,
       suppressErrorMessage: true
     };
-    if (doInteractivePasswordLogin(loginOptions)) {
-      return authedRpc(options);
+    if (await doInteractivePasswordLogin(loginOptions)) {
+      return await authedRpc(options);
     } else {
       return {
         statusCode: 403,
@@ -235,7 +241,7 @@ function authedRpc(options) {
 
   if (infoResult.statusCode === 404) {
     // Doesn't exist, therefore not protected.
-    return preflight ? { } : deployRpc(rpcOptions);
+    return preflight ? { } : await deployRpc(rpcOptions);
   }
 
   if (infoResult.errorMessage) {
@@ -247,7 +253,7 @@ function authedRpc(options) {
     // Not protected.
     //
     // XXX should prompt the user to claim the app (only if deploying?)
-    return preflight ? { } : deployRpc(rpcOptions);
+    return preflight ? { } : await deployRpc(rpcOptions);
   }
 
   if (info.protection === "account") {
@@ -275,7 +281,7 @@ function authedRpc(options) {
         authorized: info.authorized
       };
     } else {
-      return deployRpc(rpcOptions);
+      return await deployRpc(rpcOptions);
     }
   }
 
@@ -327,16 +333,19 @@ function canonicalizeSite(site) {
     url = 'http://' + url;
   }
 
-  var parsed = require('url').parse(url);
+  let parsed = null;
+  try {
+    parsed = new URL(url);
+  } catch (e) {}
 
-  if (! parsed.hostname) {
+  if (! parsed || ! parsed.hostname) {
     Console.info(
       "Please specify a domain to connect to, such as www.example.com or " +
       "http://www.example.com/");
     return false;
   }
 
-  if (parsed.pathname != '/' || parsed.hash || parsed.query) {
+  if (parsed.pathname !== '/' || parsed.hash || parsed.search) {
     Console.info(
       "Sorry, Meteor does not yet support specific path URLs, such as " +
       Console.url("http://www.example.com/blog") + " .  Please specify the root of a domain.");
@@ -348,13 +357,13 @@ function canonicalizeSite(site) {
 
 // Executes the poll to check for deployment success and outputs proper messages
 // to user about the status of their app during the polling process
-async function pollForDeploymentSuccess(versionId, deployPollTimeout, result, site) {
+async function pollForDeploymentSuccess(versionId, deployPollTimeout, result, site, deployWithTokenProps) {
   // Create a default polling configuration for polling for deploy / build
   // In the future, we may change this to be user-configurable or smart
   // The user can only currently configure the polling timeout via a flag
   const pollingState = new PollingState(deployPollTimeout);
   await sleepForMilliseconds(pollingState.initialWaitTimeMs);
-  const deploymentPollResult = await pollForDeploy(pollingState, versionId, site);
+  const deploymentPollResult = await pollForDeploy(pollingState, versionId, site, deployWithTokenProps);
   if (deploymentPollResult && deploymentPollResult.isActive) {
     return 0;
   }
@@ -395,23 +404,22 @@ class PollingState {
 // messages pertaining to the status of the version, which will then be reported
 // directly to the user. When the poll is complete, it will return an object
 // with information about the final state of the version and the app.
-async function pollForDeploy(pollingState, versionId, site) {
+async function pollForDeploy(pollingState, versionId, site, deployWithTokenProps) {
   const {
     deadline,
-    initialWaitTimeMs,
     pollIntervalMs,
-    start,
     currentMessage,
   } = pollingState;
 
   // Do a call to the version-status endpoint for the specified versionId
-  const versionStatusResult = deployRpc({
+  const versionStatusResult = await deployRpc({
     method: 'GET',
     operation: 'version-status',
     site,
     operand: versionId,
     expectPayload: ['message', 'finishStatus'],
     printDeployURL: false,
+    deployWithTokenProps
   });
 
   // Check the details of the Version Status response and compare message to last call
@@ -428,14 +436,15 @@ async function pollForDeploy(pollingState, versionId, site) {
     // keep polling as per usual – this may have just been a whiff from Galaxy.
     // We do the retry here because we might hit an error if we try to parse the
     // result of the version-status call below.
-    Console.warn(versionStatusResult.errorMessage || 'Unexpected error from Galaxy');
     pollingState.errors++;
+    const errorMessage = versionStatusResult.errorMessage || 'Unexpected error from Galaxy';
     if (pollingState.errors >= pollingState.maxErrors) {
-      Console.error(versionStatusResult.errorMessage);
+      Console.error(`Error checking deploy status; giving up: ${errorMessage}`);
       return 1;
     } else if (new Date() < deadline) {
+      Console.warn(`Error checking deploy status; will retry: ${errorMessage}`);
       await sleepForMilliseconds(pollIntervalMs);
-      return await pollForDeploy(pollingState, versionId, site);
+      return await pollForDeploy(pollingState, versionId, site, deployWithTokenProps);
     }
   }
 
@@ -444,7 +453,7 @@ async function pollForDeploy(pollingState, versionId, site) {
   if(new Date() < deadline && !finishStatus.isFinished) {
     // Wait for a set interval and then poll again
     await sleepForMilliseconds(pollIntervalMs);
-    return await pollForDeploy(pollingState, versionId, site);
+    return await pollForDeploy(pollingState, versionId, site, deployWithTokenProps);
   } else if (!finishStatus.isFinished) {
     Console.info(`Polling timed out. To check the status of your app, visit
     ${versionStatusResult.payload.galaxyUrl}. To wait longer, pass a timeout
@@ -468,6 +477,8 @@ async function pollForDeploy(pollingState, versionId, site) {
 // - buildOptions: the 'buildOptions' argument to the bundler
 // - rawOptions: any unknown options that were passed to the command line tool
 // - waitForDeploy: whether to poll Galaxy after upload for deploy status
+// - isCacheBuildEnabled: Reuses the build already created if the git commit
+//   hash is the same
 // - deployPollingTimeoutMs: user overridden timeout for polling Galaxy
 //   for deploy status
 export async function bundleAndDeploy(options) {
@@ -475,73 +486,138 @@ export async function bundleAndDeploy(options) {
     options.recordPackageUsage = true;
   }
 
-  var site = canonicalizeSite(options.site);
-  if (! site) {
-    return 1;
+  // we don't need site for build-only
+  let site = null;
+  let preflightPassword = null;
+
+  if (options.isBuildOnly) {
+    Console.info('Skipping pre authentication as the option --build-only was provided.');
+  } else {
+    site = options.site && canonicalizeSite(options.site)
+    if (! site) {
+      Console.error("Error deploying application: site is required.");
+      Console.error("Your deploy command should be like: meteor deploy <site>");
+      Console.error(
+        "For more help, see " + Console.command("'meteor deploy --help'") + ".");
+      return 1;
+    }
+
+    // We should give a username/password prompt if the user was logged in
+    // but the credentials are expired, unless the user is logged in but
+    // doesn't have a username (in which case they should hit the email
+    // prompt -- a user without a username shouldn't be given a username
+    // prompt). There's an edge case where things happen in the following
+    // order: user creates account, user sets username, credential expires
+    // or is revoked, user comes back to deploy again. In that case,
+    // they'll get an email prompt instead of a username prompt because
+    // the command-line tool didn't have time to learn about their
+    // username before the credential was expired.
+    await pollForRegistrationCompletion({
+      noLogout: true
+    });
+    const promptIfAuthFails = (loggedInUsername() !== null);
+
+    // Check auth up front, rather than after the (potentially lengthy)
+    // bundling process.
+    const preflight = await authedRpc({
+      site: site,
+      preflight: true,
+      promptIfAuthFails: promptIfAuthFails,
+      qs: Object.assign(
+        {},
+        options.rawOptions,
+        {
+          deployToken: options.deployToken,
+          owner: options.owner,
+        }
+      ),
+      printDeployURL: true
+    });
+
+    if (preflight.errorMessage) {
+      Console.error("Error deploying application: " + preflight.errorMessage);
+      return 1;
+    }
+
+    if (preflight.protection === "account" &&
+      !preflight.authorized) {
+      printUnauthorizedMessage();
+      return 1;
+    }
+
+    preflightPassword = preflight.preflightPassword;
   }
 
-  // We should give a username/password prompt if the user was logged in
-  // but the credentials are expired, unless the user is logged in but
-  // doesn't have a username (in which case they should hit the email
-  // prompt -- a user without a username shouldn't be given a username
-  // prompt). There's an edge case where things happen in the following
-  // order: user creates account, user sets username, credential expires
-  // or is revoked, user comes back to deploy again. In that case,
-  // they'll get an email prompt instead of a username prompt because
-  // the command-line tool didn't have time to learn about their
-  // username before the credential was expired.
-  pollForRegistrationCompletion({
-    noLogout: true
-  });
-  var promptIfAuthFails = (loggedInUsername() !== null);
+  const projectDir = options.projectContext.getProjectLocalDirectory('');
+  const gitCommitHash = process.env.METEOR_GIT_COMMIT_HASH || await findGitCommitHash(projectDir);
 
-  // Check auth up front, rather than after the (potentially lengthy)
-  // bundling process.
-  var preflight = authedRpc({
-    site: site,
-    preflight: true,
-    promptIfAuthFails: promptIfAuthFails,
-    qs: options.rawOptions,
-    printDeployURL: true
-  });
-
-  if (preflight.errorMessage) {
-    Console.error("Error deploying application: " + preflight.errorMessage);
-    return 1;
+  const buildCache = options.projectContext.getBuildCache();
+  let isCacheBuildValid = options.isCacheBuildEnabled;
+  if (options.isCacheBuildEnabled) {
+    if (!buildCache ||
+      !exists(buildCache.buildDir) ||
+      !exists(buildCache.bundlePath) ||
+      !buildCache.gitCommitHash ||
+      !gitCommitHash ||
+      buildCache.gitCommitHash !== gitCommitHash) {
+      Console.warn(`We don't have a valid build cache so a new build will be performed.`);
+      isCacheBuildValid = false;
+    }
   }
 
-  if (preflight.protection === "account" &&
-             ! preflight.authorized) {
-    printUnauthorizedMessage();
-    return 1;
+  function getBuildDirAndBundlePath() {
+    if (isCacheBuildValid) {
+      return buildCache;
+    }
+
+    const buildDir = mkdtemp('build_tar');
+    if (options.isCacheBuildEnabled) {
+      changeTempDirStatus(buildDir, false);
+      Console.info(`The --cache-build was used so the build folder (${buildDir}) will not be deleted on exit...`);
+    }
+    const bundlePath = pathJoin(buildDir, 'bundle');
+    return { buildDir, bundlePath };
   }
 
-  var buildDir = mkdtemp('build_tar');
-  var bundlePath = pathJoin(buildDir, 'bundle');
+  const {buildDir, bundlePath} = getBuildDirAndBundlePath();
 
-  Console.info('Preparing to deploy your app...');
+  if (options.isCacheBuildEnabled) {
+    Console.info('Saving build in cache (--cache-build)...');
+    await options.projectContext.saveBuildCache({
+      buildDir,
+      bundlePath,
+      gitCommitHash
+    });
+  }
+
+  Console.info('Preparing to build your app...');
 
   var settings = null;
-  var messages = buildmessage.capture({
+  var messages = await buildmessage.capture({
     title: "preparing to deploy",
     rootPath: process.cwd()
-  }, function () {
+  }, async function () {
     if (options.settingsFile) {
       settings = getSettings(options.settingsFile);
     }
   });
 
   if (! messages.hasMessages()) {
-    var bundler = require('../isobuild/bundler.js');
 
-    var bundleResult = bundler.bundle({
-      projectContext: options.projectContext,
-      outputPath: bundlePath,
-      buildOptions: options.buildOptions,
-    });
+    if(isCacheBuildValid) {
+      Console.info('Skipping build (--cache-build)...');
+    } else {
+      const bundler = require('../isobuild/bundler.js');
 
-    if (bundleResult.errors) {
-      messages = bundleResult.errors;
+      const bundleResult = await bundler.bundle({
+        projectContext: options.projectContext,
+        outputPath: bundlePath,
+        buildOptions: options.buildOptions,
+      });
+
+      if (bundleResult.errors) {
+        messages = bundleResult.errors;
+      }
     }
   }
 
@@ -552,24 +628,48 @@ export async function bundleAndDeploy(options) {
   }
 
   if (options.recordPackageUsage) {
-    recordPackages({
+    await recordPackages({
       what: "sdk.deploy",
       projectContext: options.projectContext,
       site: site
     });
   }
 
-  const result = buildmessage.enterJob({
+  if (options.isBuildOnly) {
+    Console.info(
+      '\nYour build is ready. As you used the option --build-only the process finished after the build.'
+    );
+    return 0;
+  }
+
+  const deployWithTokenProps = {
+    deployToken: options.deployToken,
+    owner: options.owner
+  };
+
+  Console.info('Preparing to upload your app...');
+  const result = await buildmessage.enterJob({
     title: "uploading"
-  }, Profile("upload bundle", function () {
-    return authedRpc({
+  }, Profile("upload bundle", async function () {
+    return await authedRpc({
       method: 'POST',
       operation: 'deploy',
       site: site,
-      qs: Object.assign({}, options.rawOptions, settings !== null ? {settings: settings} : {}),
+      qs: Object.assign(
+        {},
+        options.rawOptions,
+        settings !== null ? {settings: settings} : {},
+        {
+          free: options.free,
+          plan: options.plan,
+          containerSize: options.containerSize,
+          mongo: options.mongo,
+          ...deployWithTokenProps,
+        },
+      ),
       bodyStream: createTarGzStream(pathJoin(buildDir, 'bundle')),
       expectPayload: ['url'],
-      preflightPassword: preflight.preflightPassword,
+      preflightPassword,
       // Disable the HTTP timeout for this POST request.
       timeout: null,
       waitForDeploy: options.waitForDeploy,
@@ -592,22 +692,25 @@ export async function bundleAndDeploy(options) {
   // build / deploy succeed. We indicate that Meteor should poll for version
   // status by including a newVersionId in the payload.
   if (options.waitForDeploy && result.payload.newVersionId) {
+    Console.info('Waiting for deployment updates from Galaxy...');
     return await pollForDeploymentSuccess(
       result.payload.newVersionId,
       options.deployPollingTimeoutMs,
       result,
-      site);
+      site,
+      deployWithTokenProps,
+    );
   }
   return 0;
 };
 
-export function deleteApp(site) {
+export async function deleteApp(site) {
   site = canonicalizeSite(site);
   if (! site) {
     return 1;
   }
 
-  var result = authedRpc({
+  var result = await authedRpc({
     method: 'DELETE',
     operation: 'deploy',
     site: site,
@@ -632,8 +735,8 @@ export function deleteApp(site) {
 // messages.  Returns the result of the RPC if successful, or null
 // otherwise (including if auth failed or if the user is not authorized
 // for this site).
-function checkAuthThenSendRpc(site, operation, what) {
-  var preflight = authedRpc({
+async function checkAuthThenSendRpc(site, operation, what) {
+  var preflight = await authedRpc({
     operation: operation,
     site: site,
     preflight: true,
@@ -651,7 +754,7 @@ function checkAuthThenSendRpc(site, operation, what) {
     if (! isLoggedIn()) {
       // Maybe the user is authorized for this app but not logged in
       // yet, so give them a login prompt.
-      var loginResult = doUsernamePasswordLogin({ retry: true });
+      var loginResult = await doUsernamePasswordLogin({ retry: true });
       if (loginResult) {
         // Once we've logged in, retry the whole operation. We need to
         // do the preflight request again instead of immediately moving
@@ -659,7 +762,7 @@ function checkAuthThenSendRpc(site, operation, what) {
         // logged-in user is authorized for this app, and if they
         // aren't, then we want to print the nice unauthorized error
         // message.
-        return checkAuthThenSendRpc(site, operation, what);
+        return await checkAuthThenSendRpc(site, operation, what);
       } else {
         // Shouldn't ever get here because we set the retry flag on the
         // login, but just in case.
@@ -681,7 +784,7 @@ function checkAuthThenSendRpc(site, operation, what) {
 
   // User is authorized for the app; go ahead and do the actual RPC.
 
-  var result = authedRpc({
+  var result = await authedRpc({
     operation: operation,
     site: site,
     expectMessage: true,
@@ -699,14 +802,14 @@ function checkAuthThenSendRpc(site, operation, what) {
 // On failure, prints a message to stderr and returns null. Otherwise,
 // returns a temporary authenticated Mongo URL allowing access to this
 // site's database.
-export function temporaryMongoUrl(site) {
+export async function temporaryMongoUrl(site) {
   site = canonicalizeSite(site);
   if (! site) {
     // canonicalizeSite printed an error
     return null;
   }
 
-  var result = checkAuthThenSendRpc(site, 'mongo', 'open a mongo connection');
+  var result = await checkAuthThenSendRpc(site, 'mongo', 'open a mongo connection');
 
   if (result !== null) {
     return result.message;
@@ -715,13 +818,13 @@ export function temporaryMongoUrl(site) {
   }
 };
 
-export function listAuthorized(site) {
+export async function listAuthorized(site) {
   site = canonicalizeSite(site);
   if (! site) {
     return 1;
   }
 
-  var result = deployRpc({
+  var result = await deployRpc({
     operation: 'info',
     site: site,
     expectPayload: [],
@@ -759,14 +862,14 @@ export function listAuthorized(site) {
 };
 
 // action is "add", "transfer" or "remove"
-export function changeAuthorized(site, action, username) {
+export async function changeAuthorized(site, action, username) {
   site = canonicalizeSite(site);
   if (! site) {
     // canonicalizeSite will have already printed an error
     return 1;
   }
 
-  var result = authedRpc({
+  var result = await authedRpc({
     method: 'POST',
     operation: 'authorized',
     site: site,
@@ -781,16 +884,16 @@ export function changeAuthorized(site, action, username) {
   }
 
   const verbs = {
-    add: "added",
-    remove: "removed",
-    transfer: "transferred"
+    add: "added to",
+    remove: "removed from",
+    transfer: "transferred to"
   };
   Console.info(`${site}: ${verbs[action]} ${username}`);
   return 0;
 };
 
-export function listSites() {
-  var result = deployRpc({
+export async function listSites() {
+  var result = await deployRpc({
     method: "GET",
     operation: "authorized-apps",
     promptIfAuthFails: true,
@@ -832,7 +935,7 @@ const galaxyDiscoveryCache = new Map;
 
 // getDeployURL returns the a Promise for the base deploy URL for the given app.
 // "app" may be falsey for certain RPCs (eg meteor list-sites).
-function getDeployURL(site) {
+async function getDeployURL(site) {
   // Always trust explicitly configuration via env.
   if (process.env.DEPLOY_HOSTNAME) {
     return Promise.resolve(addScheme(process.env.DEPLOY_HOSTNAME.trim()));
@@ -853,8 +956,8 @@ function getDeployURL(site) {
   }
 
   // Otherwise, try https first, then http, then just use the default.
-  const p = discoverGalaxy(site, "https")
-          .catch(() => discoverGalaxy(site, "http"))
+  const p = await discoverGalaxy(site, "https")
+          .catch(async () => await discoverGalaxy(site, "http"))
           .catch(() => defaultURL);
   galaxyDiscoveryCache.set(site, p);
   return p;
@@ -867,7 +970,7 @@ async function discoverGalaxy(site, scheme) {
           scheme + "://" + site + "/.well-known/meteor/deploy-url";
   // If httpHelpers.request throws, the returned Promise will reject, which is
   // fine.
-  const { response, body } = request({
+  const { response, body } = await request({
     url: discoveryURL,
     json: true,
     strictSSL: true,

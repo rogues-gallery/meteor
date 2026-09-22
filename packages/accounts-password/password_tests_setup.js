@@ -118,53 +118,25 @@ Accounts.config({
 });
 
 
-Meteor.methods({
-  testMeteorUser: () => Meteor.user(),
-  clearUsernameAndProfile: function () {
-    if (!this.userId)
-      throw new Error("Not logged in!");
-    Meteor.users.update(this.userId,
-                        {$unset: {profile: 1, username: 1}});
-  },
+Meteor.methods(
+  {
+    testMeteorUser:
+      async () => await Meteor.userAsync(),
 
-  expireTokens: function () {
-    Accounts._expireTokens(new Date(), this.userId);
-  },
-  removeUser: username => Meteor.users.remove({ "username": username }),
-});
+    clearUsernameAndProfile:
+      async function () {
+        if (!this.userId) throw new Error("Not logged in!");
+        await Meteor
+          .users
+          .updateAsync(this.userId, { $unset: { profile: 1, username: 1 } });
+      },
 
+    expireTokens:
+      async function () {
+        await Accounts._expireTokens(new Date(), this.userId);
+      },
 
-// Create a user that had previously logged in with SRP.
-
-Meteor.methods({
-  testCreateSRPUser: () => {
-    const username = Random.id();
-    Meteor.users.remove({username: username});
-    const userId = Accounts.createUser({username: username});
-    Meteor.users.update(
-      userId,
-      { '$set': { 'services.password.srp': {
-          "identity" : "iPNrshUEcpOSO5fRDu7o4RRDc9OJBCGGljYpcXCuyg9",
-          "salt" : "Dk3lFggdEtcHU3aKm6Odx7sdcaIrMskQxBbqtBtFzt6",
-          "verifier" : "2e8bce266b1357edf6952cc56d979db19f699ced97edfb2854b95972f820b0c7006c1a18e98aad40edf3fe111b87c52ef7dd06b320ce452d01376df2d560fdc4d8e74f7a97bca1f67b3cfaef34dee34dd6c76571c247d762624dc166dab5499da06bc9358528efa75bf74e2e7f5a80d09e60acf8856069ae5cfb080f2239ee76"
-      } } }
-    );
-    return username;
-  },
-
-  testSRPUpgrade: username => {
-    const user = Meteor.users.findOne({username: username});
-    if (user.services && user.services.password && user.services.password.srp)
-      throw new Error("srp wasn't removed");
-    if (!(user.services && user.services.password && user.services.password.bcrypt))
-      throw new Error("bcrypt wasn't added");
-  },
-
-  testNoSRPUpgrade: username => {
-    const user = Meteor.users.findOne({username: username});
-    if (user.services && user.services.password && user.services.password.bcrypt)
-      throw new Error("bcrypt was added");
-    if (user.services && user.services.password && ! user.services.password.srp)
-      throw new Error("srp was removed");
+    removeUser:
+      async username => await Meteor.users.removeAsync({ "username": username }),
   }
-});
+);

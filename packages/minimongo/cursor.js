@@ -1,5 +1,6 @@
 import LocalCollection from './local_collection.js';
 import { hasOwn } from './common.js';
+import { ASYNC_CURSOR_METHODS, getAsyncMethodName } from './constants';
 
 // Cursor: a specification for a particular subset of documents, w/ a defined
 // order, limit, and offset.  creating a Cursor with LocalCollection.find(),
@@ -8,24 +9,27 @@ export default class Cursor {
   constructor(collection, selector, options = {}) {
     this.collection = collection;
     this.sorter = null;
-    this.matcher = new Minimongo.Matcher(selector);
 
-    if (LocalCollection._selectorIsIdPerhapsAsObject(selector)) {
+    // Create the collator once and share it with both Matcher and Sorter.
+    const collator = LocalCollection._createCollator(options.collation);
+
+    this.matcher = new Minimongo.Matcher(selector, undefined, collator);
+
+    if (LocalCollection._selectorIsIdPerhapsAsObject(selector) &&
+        !options.collation) {
       // stash for fast _id and { _id }
-      this._selectorId = hasOwn.call(selector, '_id')
-        ? selector._id
-        : selector;
+      this._selectorId = hasOwn.call(selector, '_id') ? selector._id : selector;
     } else {
       this._selectorId = undefined;
 
       if (this.matcher.hasGeoQuery() || options.sort) {
-        this.sorter = new Minimongo.Sorter(options.sort || []);
+        this.sorter = new Minimongo.Sorter(options.sort || [], collator);
       }
     }
 
     this.skip = options.skip || 0;
     this.limit = options.limit;
-    this.fields = options.fields;
+    this.fields = options.projection || options.fields;
 
     this._projectionFn = LocalCollection._compileProjection(this.fields || {});
 
@@ -38,27 +42,25 @@ export default class Cursor {
   }
 
   /**
-   * @summary Returns the number of documents that match a query.
+   * @deprecated in 2.9
+   * @summary Returns the number of documents that match a query. This method is
+   *          [deprecated since MongoDB 4.0](https://www.mongodb.com/docs/v4.4/reference/command/count/);
+   *          see `Collection.countDocuments` and
+   *          `Collection.estimatedDocumentCount` for a replacement.
    * @memberOf Mongo.Cursor
    * @method  count
-   * @param {boolean} [applySkipLimit=true] If set to `false`, the value
-   *                                         returned will reflect the total
-   *                                         number of matching documents,
-   *                                         ignoring any value supplied for
-   *                                         limit
    * @instance
    * @locus Anywhere
    * @returns {Number}
    */
-  count(applySkipLimit = true) {
+  count() {
     if (this.reactive) {
       // allow the observe to be unordered
-      this._depend({added: true, removed: true}, true);
+      this._depend({ added: true, removed: true }, true);
     }
 
     return this._getRawObjects({
       ordered: true,
-      applySkipLimit
     }).length;
   }
 
@@ -86,11 +88,12 @@ export default class Cursor {
         addedBefore: true,
         removed: true,
         changed: true,
-        movedBefore: true});
+        movedBefore: true,
+      });
     }
 
     let index = 0;
-    const objects = this._getRawObjects({ordered: true});
+    const objects = this._getRawObjects({ ordered: true });
 
     return {
       next: () => {
@@ -98,14 +101,22 @@ export default class Cursor {
           // This doubles as a clone operation.
           let element = this._projectionFn(objects[index++]);
 
-          if (this._transform)
-            element = this._transform(element);
+          if (this._transform) element = this._transform(element);
 
-          return {value: element};
+          return { value: element };
         }
 
-        return {done: true};
-      }
+        return { done: true };
+      },
+    };
+  }
+
+  [Symbol.asyncIterator]() {
+    const syncResult = this[Symbol.iterator]();
+    return {
+      async next() {
+        return Promise.resolve(syncResult.next());
+      },
     };
   }
 
@@ -129,24 +140,34 @@ export default class Cursor {
    *                        `callback`.
    */
   forEach(callback, thisArg) {
-    if (this.reactive) {
-      this._depend({
-        addedBefore: true,
-        removed: true,
-        changed: true,
-        movedBefore: true});
+    let i = 0;
+
+    for (const doc of this) {
+      callback.call(thisArg, doc, i++, this);
     }
+  }
 
-    this._getRawObjects({ordered: true}).forEach((element, i) => {
-      // This doubles as a clone operation.
-      element = this._projectionFn(element);
+  /**
+   * @summary Call `callback` once for each matching document, sequentially and
+   *          synchronously.
+   * @locus Anywhere
+   * @method  forEachAsync
+   * @instance
+   * @memberOf Mongo.Cursor
+   * @param {IterationCallback} callback Function to call. It will be called
+   *                                     with three arguments: the document, a
+   *                                     0-based index, and <em>cursor</em>
+   *                                     itself.
+   * @param {Any} [thisArg] An object which will be the value of `this` inside
+   *                        `callback`.
+   * @returns {Promise}
+   */
+  async forEachAsync(callback, thisArg) {
+    let i = 0;
 
-      if (this._transform) {
-        element = this._transform(element);
-      }
-
-      callback.call(thisArg, element, i, this);
-    });
+    for await (const doc of this) {
+      await callback.call(thisArg, doc, i++, this);
+    }
   }
 
   getTransform() {
@@ -154,7 +175,7 @@ export default class Cursor {
   }
 
   /**
-   * @summary Map callback over all matching documents.  Returns an Array.
+   * @summary Map callback over all matching documents. Returns an Array.
    * @locus Anywhere
    * @method map
    * @instance
@@ -171,6 +192,30 @@ export default class Cursor {
 
     this.forEach((doc, i) => {
       result.push(callback.call(thisArg, doc, i, this));
+    });
+
+    return result;
+  }
+
+  /**
+   * @summary Map callback over all matching documents. Returns a Promise<Array>.
+   * @locus Anywhere
+   * @method mapAsync
+   * @instance
+   * @memberOf Mongo.Cursor
+   * @param {IterationCallback} callback Function to call. It will be called
+   *                                     with three arguments: the document, a
+   *                                     0-based index, and <em>cursor</em>
+   *                                     itself.
+   * @param {Any} [thisArg] An object which will be the value of `this` inside
+   *                        `callback`.
+   * @returns {Promise<Array>}
+   */
+  async mapAsync(callback, thisArg) {
+    const result = [];
+
+    await this.forEachAsync(async (doc, i) => {
+      result.push(await callback.call(thisArg, doc, i, this));
     });
 
     return result;
@@ -210,6 +255,16 @@ export default class Cursor {
   }
 
   /**
+   * @summary Watch a query.  Receive callbacks as the result set changes.
+   * @locus Anywhere
+   * @memberOf Mongo.Cursor
+   * @instance
+   */
+  observeAsync(options) {
+    return new Promise(resolve => resolve(this.observe(options)));
+  }
+
+  /**
    * @summary Watch a query. Receive callbacks as the result set changes. Only
    *          the differences between the old and new documents are passed to
    *          the callbacks.
@@ -229,19 +284,16 @@ export default class Cursor {
     if (!options._allow_unordered && !ordered && (this.skip || this.limit)) {
       throw new Error(
         "Must use an ordered observe with skip or limit (i.e. 'addedBefore' " +
-        "for observeChanges or 'addedAt' for observe, instead of 'added')."
+          "for observeChanges or 'addedAt' for observe, instead of 'added')."
       );
     }
 
     if (this.fields && (this.fields._id === 0 || this.fields._id === false)) {
-      throw Error('You may not observe a cursor with {fields: {_id: 0}}');
+      throw Error("You may not observe a cursor with {fields: {_id: 0}}");
     }
 
-    const distances = (
-      this.matcher.hasGeoQuery() &&
-      ordered &&
-      new LocalCollection._IdMap
-    );
+    const distances =
+      this.matcher.hasGeoQuery() && ordered && new LocalCollection._IdMap();
 
     const query = {
       cursor: this,
@@ -251,7 +303,7 @@ export default class Cursor {
       ordered,
       projectionFn: this._projectionFn,
       resultsSnapshot: null,
-      sorter: ordered && this.sorter
+      sorter: ordered && this.sorter,
     };
 
     let qid;
@@ -263,10 +315,13 @@ export default class Cursor {
       this.collection.queries[qid] = query;
     }
 
-    query.results = this._getRawObjects({ordered, distances: query.distances});
+    query.results = this._getRawObjects({
+      ordered,
+      distances: query.distances,
+    });
 
     if (this.collection.paused) {
-      query.resultsSnapshot = ordered ? [] : new LocalCollection._IdMap;
+      query.resultsSnapshot = ordered ? [] : new LocalCollection._IdMap();
     }
 
     // wrap callbacks we were passed. callbacks only fire when not paused and
@@ -276,13 +331,14 @@ export default class Cursor {
 
     // furthermore, callbacks enqueue until the operation we're working on is
     // done.
-    const wrapCallback = fn => {
+    const wrapCallback = (fn) => {
       if (!fn) {
         return () => {};
       }
 
       const self = this;
-      return function(/* args*/) {
+
+      return function (/* args*/) {
         if (self.collection.paused) {
           return;
         }
@@ -305,7 +361,7 @@ export default class Cursor {
     }
 
     if (!options._suppress_initial && !this.collection.paused) {
-      query.results.forEach(doc => {
+      const handler = (doc) => {
         const fields = EJSON.clone(doc);
 
         delete fields._id;
@@ -315,16 +371,28 @@ export default class Cursor {
         }
 
         query.added(doc._id, this._projectionFn(fields));
-      });
+      };
+      // it means it's just an array
+      if (query.results.length) {
+        for (const doc of query.results) {
+          handler(doc);
+        }
+      }
+      // it means it's an id map
+      if (query.results?.size?.()) {
+        query.results.forEach(handler);
+      }
     }
 
-    const handle = Object.assign(new LocalCollection.ObserveHandle, {
+    const handle = Object.assign(new LocalCollection.ObserveHandle(), {
       collection: this.collection,
       stop: () => {
         if (this.reactive) {
           delete this.collection.queries[qid];
         }
-      }
+      },
+      isReady: false,
+      isReadyPromise: null,
     });
 
     if (this.reactive && Tracker.active) {
@@ -340,34 +408,54 @@ export default class Cursor {
 
     // run the observe callbacks resulting from the initial contents
     // before we leave the observe.
-    this.collection._observeQueue.drain();
+    const drainResult = this.collection._observeQueue.drain();
+
+    if (drainResult instanceof Promise) {
+      handle.isReadyPromise = drainResult;
+      drainResult.then(() => (handle.isReady = true));
+    } else {
+      handle.isReady = true;
+      handle.isReadyPromise = Promise.resolve();
+    }
 
     return handle;
   }
 
-  // Since we don't actually have a "nextObject" interface, there's really no
-  // reason to have a "rewind" interface.  All it did was make multiple calls
-  // to fetch/map/forEach return nothing the second time.
-  // XXX COMPAT WITH 0.8.1
-  rewind() {}
+  /**
+   * @summary Watch a query. Receive callbacks as the result set changes. Only
+   *          the differences between the old and new documents are passed to
+   *          the callbacks.
+   * @locus Anywhere
+   * @memberOf Mongo.Cursor
+   * @instance
+   * @param {Object} callbacks Functions to call to deliver the result set as it
+   *                           changes
+   */
+  observeChangesAsync(options) {
+    return new Promise((resolve) => {
+      const handle = this.observeChanges(options);
+      handle.isReadyPromise.then(() => resolve(handle));
+    });
+  }
 
   // XXX Maybe we need a version of observe that just calls a callback if
   // anything changed.
   _depend(changers, _allow_unordered) {
     if (Tracker.active) {
-      const dependency = new Tracker.Dependency;
+      const dependency = new Tracker.Dependency();
       const notify = dependency.changed.bind(dependency);
 
       dependency.depend();
 
-      const options = {_allow_unordered, _suppress_initial: true};
+      const options = { _allow_unordered, _suppress_initial: true };
 
-      ['added', 'addedBefore', 'changed', 'movedBefore', 'removed']
-        .forEach(fn => {
+      ['added', 'addedBefore', 'changed', 'movedBefore', 'removed'].forEach(
+        fn => {
           if (changers[fn]) {
             options[fn] = notify;
           }
-        });
+        }
+      );
 
       // observeChanges will stop() when this computation is invalidated
       this.observeChanges(options);
@@ -404,7 +492,7 @@ export default class Cursor {
 
     // XXX use OrderedDict instead of array, and make IdMap and OrderedDict
     // compatible
-    const results = options.ordered ? [] : new LocalCollection._IdMap;
+    const results = options.ordered ? [] : new LocalCollection._IdMap();
 
     // fast path for single ID value
     if (this._selectorId !== undefined) {
@@ -415,7 +503,6 @@ export default class Cursor {
       }
 
       const selectedDoc = this.collection._docs.get(this._selectorId);
-
       if (selectedDoc) {
         if (options.ordered) {
           results.push(selectedDoc);
@@ -423,7 +510,6 @@ export default class Cursor {
           results.set(this._selectorId, selectedDoc);
         }
       }
-
       return results;
     }
 
@@ -442,34 +528,32 @@ export default class Cursor {
       }
     }
 
-    this.collection._docs.forEach((doc, id) => {
-      const matchResult = this.matcher.documentMatches(doc);
+    Meteor._runFresh(() => {
+      this.collection._docs.forEach((doc, id) => {
+        const matchResult = this.matcher.documentMatches(doc);
+        if (matchResult.result) {
+          if (options.ordered) {
+            results.push(doc);
 
-      if (matchResult.result) {
-        if (options.ordered) {
-          results.push(doc);
-
-          if (distances && matchResult.distance !== undefined) {
-            distances.set(id, matchResult.distance);
+            if (distances && matchResult.distance !== undefined) {
+              distances.set(id, matchResult.distance);
+            }
+          } else {
+            results.set(id, doc);
           }
-        } else {
-          results.set(id, doc);
         }
-      }
 
-      // Override to ensure all docs are matched if ignoring skip & limit
-      if (!applySkipLimit) {
-        return true;
-      }
+        // Override to ensure all docs are matched if ignoring skip & limit
+        if (!applySkipLimit) {
+          return true;
+        }
 
-      // Fast path for limited unsorted queries.
-      // XXX 'length' check here seems wrong for ordered
-      return (
-        !this.limit ||
-        this.skip ||
-        this.sorter ||
-        results.length !== this.limit
-      );
+        // Fast path for limited unsorted queries.
+        // XXX 'length' check here seems wrong for ordered
+        return (
+          !this.limit || this.skip || this.sorter || results.length !== this.limit
+        );
+      });
     });
 
     if (!options.ordered) {
@@ -477,7 +561,7 @@ export default class Cursor {
     }
 
     if (this.sorter) {
-      results.sort(this.sorter.getComparator({distances}));
+      results.sort(this.sorter.getComparator({ distances }));
     }
 
     // Return the full set of results if there is no skip or limit or if we're
@@ -496,13 +580,13 @@ export default class Cursor {
     // XXX minimongo should not depend on mongo-livedata!
     if (!Package.mongo) {
       throw new Error(
-        'Can\'t publish from Minimongo without the `mongo` package.'
+        "Can't publish from Minimongo without the `mongo` package."
       );
     }
 
     if (!this.collection.name) {
       throw new Error(
-        'Can\'t publish a cursor from a collection without a name.'
+        "Can't publish a cursor from a collection without a name."
       );
     }
 
@@ -513,3 +597,20 @@ export default class Cursor {
     );
   }
 }
+
+// Implements async version of cursor methods to keep collections isomorphic
+ASYNC_CURSOR_METHODS.forEach(method => {
+  const asyncName = getAsyncMethodName(method);
+
+  if (Cursor.prototype[asyncName]) {
+    return;
+  }
+
+  Cursor.prototype[asyncName] = function(...args) {
+    try {
+      return Promise.resolve(this[method].apply(this, args));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
+});

@@ -2,15 +2,18 @@
 // (web.browser, web.browser.legacy, web.cordova). When a client observes
 // a change in the versions associated with its client architecture,
 // it will refresh itself, either by swapping out CSS assets or by
-// reloading the page.
+// reloading the page. Changes to the replaceable version are ignored
+// and handled by the hot-module-replacement package.
 //
-// There are three versions for any given client architecture: `version`,
-// `versionRefreshable`, and `versionNonRefreshable`. The refreshable
-// version is a hash of just the client resources that are refreshable,
-// such as CSS, while the non-refreshable version is a hash of the rest of
-// the client assets, excluding the refreshable ones: HTML, JS, and static
-// files in the `public` directory. The `version` version is a combined
-// hash of everything.
+// There are four versions for any given client architecture: `version`,
+// `versionRefreshable`, `versionNonRefreshable`, and
+// `versionReplaceable`. The refreshable version is a hash of just the
+// client resources that are refreshable, such as CSS. The replaceable
+// version is a hash of files that can be updated with HMR. The
+// non-refreshable version is a hash of the rest of the client assets,
+// excluding the refreshable ones: HTML, JS that is not replaceable, and
+// static files in the `public` directory. The `version` version is a
+// combined hash of everything.
 //
 // If the environment variable `AUTOUPDATE_VERSION` is set, it will be
 // used in place of all client versions. You can use this variable to
@@ -22,8 +25,8 @@
 // The ID of each document is the client architecture, and the fields of
 // the document are the versions described above.
 
+import { onMessage } from "meteor/inter-process-messaging";
 import { ClientVersions } from "./client_versions.js";
-var Future = Npm.require("fibers/future");
 
 export const Autoupdate = __meteor_runtime_config__.autoupdate = {
   // Map from client architectures (web.browser, web.browser.legacy,
@@ -50,12 +53,12 @@ Autoupdate.autoupdateVersionRefreshable = null;
 Autoupdate.autoupdateVersionCordova = null;
 Autoupdate.appId = __meteor_runtime_config__.appId = process.env.APP_ID;
 
-var syncQueue = new Meteor._SynchronousQueue();
+var syncQueue = new Meteor._AsynchronousQueue();
 
-function updateVersions(shouldReloadClientProgram) {
+async function updateVersions(shouldReloadClientProgram) {
   // Step 1: load the current client program on the server
   if (shouldReloadClientProgram) {
-    WebAppInternals.reloadClientPrograms();
+    await WebAppInternals.reloadClientPrograms();
   }
 
   const {
@@ -75,13 +78,16 @@ function updateVersions(shouldReloadClientProgram) {
         WebApp.calculateClientHashRefreshable(arch),
       versionNonRefreshable: AUTOUPDATE_VERSION ||
         WebApp.calculateClientHashNonRefreshable(arch),
+      versionReplaceable: AUTOUPDATE_VERSION ||
+        WebApp.calculateClientHashReplaceable(arch),
+      versionHmr: WebApp.clientPrograms[arch].hmrVersion
     };
   });
 
   // Step 3: form the new client boilerplate which contains the updated
   // assets and __meteor_runtime_config__.
   if (shouldReloadClientProgram) {
-    WebAppInternals.generateBoilerplate();
+    await WebAppInternals.generateBoilerplate();
   }
 
   // Step 4: update the ClientVersions collection.
@@ -124,8 +130,8 @@ Meteor.publish(
   {is_auto: true}
 );
 
-Meteor.startup(function () {
-  updateVersions(false);
+Meteor.startup(async function () {
+  await updateVersions(false);
 
   // Force any connected clients that are still looking for these older
   // document IDs to reload.
@@ -139,33 +145,45 @@ Meteor.startup(function () {
   });
 });
 
-var fut = new Future();
-
-// We only want 'refresh' to trigger 'updateVersions' AFTER onListen,
-// so we add a queued task that waits for onListen before 'refresh' can queue
-// tasks. Note that the `onListening` callbacks do not fire until after
-// Meteor.startup, so there is no concern that the 'updateVersions' calls from
-// 'refresh' will overlap with the `updateVersions` call from Meteor.startup.
-
-syncQueue.queueTask(function () {
-  fut.wait();
-});
-
-WebApp.onListening(function () {
-  fut.return();
-});
-
 function enqueueVersionsRefresh() {
-  syncQueue.queueTask(function () {
-    updateVersions(true);
+  syncQueue.queueTask(async function () {
+    await updateVersions(true);
   });
 }
 
-// Listen for messages pertaining to the client-refresh topic.
-import { onMessage } from "meteor/inter-process-messaging";
-onMessage("client-refresh", enqueueVersionsRefresh);
+const setupListeners = () => {
+  // Listen for messages pertaining to the client-refresh topic.
+  onMessage("client-refresh", enqueueVersionsRefresh);
 
-// Another way to tell the process to refresh: send SIGHUP signal
-process.on('SIGHUP', Meteor.bindEnvironment(function () {
-  enqueueVersionsRefresh();
-}, "handling SIGHUP signal for refresh"));
+  // Another way to tell the process to refresh: send SIGHUP signal
+  process.on('SIGHUP', Meteor.bindEnvironment(function () {
+    enqueueVersionsRefresh();
+  }, "handling SIGHUP signal for refresh"));
+};
+
+if (Meteor._isFibersEnabled) {
+  var Future = Npm.require("fibers/future");
+
+  var fut = new Future();
+
+  // We only want 'refresh' to trigger 'updateVersions' AFTER onListen,
+  // so we add a queued task that waits for onListen before 'refresh' can queue
+  // tasks. Note that the `onListening` callbacks do not fire until after
+  // Meteor.startup, so there is no concern that the 'updateVersions' calls from
+  // 'refresh' will overlap with the `updateVersions` call from Meteor.startup.
+
+  syncQueue.queueTask(function () {
+    fut.wait();
+  });
+
+  WebApp.onListening(function () {
+    fut.return();
+  });
+
+  setupListeners();
+
+} else {
+  WebApp.onListening(function () {
+    Promise.resolve(setupListeners());
+  });
+}

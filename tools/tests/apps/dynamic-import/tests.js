@@ -15,7 +15,14 @@ describe("dynamic import(...)", function () {
   maybeClearDynamicImportCache();
 
   it("ignores bad __meteor__/dynamic-import/fetch requests (#10147)", function () {
-    return fetch(Meteor.absoluteUrl("/__meteor__/dynamic-import/fetch"), {
+    // using localhost gives an issue on Windows
+    // https://github.com/node-fetch/node-fetch/issues/1624
+    // will replace with localhost once the issue is resolved
+    // workaround is to use 127.0.0.1 instead of localhost
+    const localhost = Meteor.absoluteUrl("/__meteor__/dynamic-import/fetch", {
+      replaceLocalhost: true // https://docs.meteor.com/api/core.html#Meteor-absoluteUrl
+    });
+    return fetch(localhost, {
       // POST request with empty body.
       method: "POST"
     }).then(async (res) => {
@@ -136,7 +143,7 @@ describe("dynamic import(...)", function () {
         assert.strictEqual(lazy.name, requiredName);
       }),
 
-      import("meteor/lazy-test-package/dynamic").then(dynamic => {
+      import("meteor/lazy-test-package/dynamic").then(async dynamic => {
         assert.strictEqual(
           dynamic.name,
           "/node_modules/meteor/lazy-test-package/dynamic.js"
@@ -145,7 +152,7 @@ describe("dynamic import(...)", function () {
         // Now the synchronous dynamic require succeeds because the module
         // has been fetched dynamically.
         assert.strictEqual(
-          require(dynamicId).name,
+          (await require(dynamicId)).name,
           dynamic.name
         );
       })
@@ -206,7 +213,7 @@ describe("dynamic import(...)", function () {
   it("can import module.exports = {...}-style modules", () => {
     return import("./imports/module-exports-esModule").then(m => {
       assert.strictEqual(typeof m, "object");
-      assert.deepEqual(m, {});
+      assert.deepEqual(Object.keys(m), []);
     });
   });
 
@@ -230,9 +237,10 @@ describe("dynamic import(...)", function () {
   });
 
   it("should track dynamic peer imports from packages (#9187)", () => {
+    const absId = require.resolve("optimism");
     const version = require(
       "meteor/dynamic-import/dynamic-versions.js"
-    ).get("/node_modules/optimism/lib/index.js");
+    ).get(absId);
 
     if (Meteor.isClient) {
       assert.strictEqual(typeof version, "string");
@@ -246,15 +254,15 @@ describe("dynamic import(...)", function () {
   });
 
   it('should support object-valued package.json "browser" fields', () => {
-    return import("uuid").then(({ default: uuid }) => {
+    return import("uuid").then(({ v4: uuid }) => {
       const id = uuid();
       assert.strictEqual(typeof id, "string");
       assert.strictEqual(id.split("-").length, 5);
 
       if (Meteor.isClient) {
         assert.strictEqual(
-          require.resolve("uuid/lib/rng.js"),
-          "/node_modules/uuid/lib/rng-browser.js"
+          require.resolve("uuid/dist/esm-node/index.js"),
+          "/node_modules/uuid/dist/esm-browser/index.js"
         );
         const uuidPkgJsonId = ["uuid", "package.json"].join("/");
         const { browser } = require(uuidPkgJsonId);

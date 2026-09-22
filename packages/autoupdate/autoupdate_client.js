@@ -15,7 +15,7 @@
 // version available on the server.
 //
 // `Autoupdate.newClientAvailable` is a reactive data source which
-// becomes `true` if there is a new version of the client is available on
+// becomes `true` if a new version of the client is available on
 // the server.
 //
 // This package doesn't implement a soft code reload process itself,
@@ -42,10 +42,10 @@ export const Autoupdate = {};
 
 // Stores acceptable client versions.
 const clientVersions =
-  Autoupdate._clientVersions = // Used by a self-test.
+  Autoupdate._clientVersions = // Used by a self-test and hot-module-replacement
   new ClientVersions();
 
-Meteor.connection.registerStore(
+Meteor.connection.registerStoreClient(
   "meteor_autoupdate_clientVersions",
   clientVersions.createStore()
 );

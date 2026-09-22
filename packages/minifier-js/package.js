@@ -1,14 +1,22 @@
 Package.describe({
   summary: "JavaScript minifier",
-  version: "2.4.1"
+  version: "3.3.1",
 });
 
 Npm.depends({
-  terser: "3.16.1"
+  terser: "5.31.0"
 });
 
 Package.onUse(function (api) {
+  api.use('ecmascript');
   api.use('babel-compiler');
-  api.export(['meteorJsMinify']);
-  api.addFiles(['minifier.js'], 'server');
+  api.mainModule('minifier.js', 'server');
+  api.export('meteorJsMinify');
+});
+
+Package.onTest(function (api) {
+  api.use('ecmascript');
+  api.use('tinytest');
+  api.use('minifier-js');
+  api.mainModule('minifier-tests.js', 'server');
 });

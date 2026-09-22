@@ -1,13 +1,13 @@
-import React from 'react';
-import Hello from './Hello.jsx';
-import Info from './Info.jsx';
+import { Counter } from "./Counter.jsx";
+import { Header } from "./Header.jsx";
+import { Info } from "./Info.jsx";
 
-const App = () => (
-  <div>
-    <h1>Welcome to Meteor!</h1>
-    <Hello />
-    <Info />
+export const App = () => (
+  <div className="page">
+    <Header />
+    <main className="main">
+      <Counter />
+      <Info />
+    </main>
   </div>
 );
-
-export default App;

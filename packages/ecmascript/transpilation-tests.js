@@ -40,7 +40,7 @@ Tinytest.add("ecmascript - transpilation - class methods", (test) => {
   test.isTrue(contains(output, 'Foo.staticMethod = function staticMethod('));
   test.isTrue(contains(output,
                        '.prototypeMethod = function prototypeMethod('));
-  test.isTrue(contains(output, '[computedMethod] = function ('));
+  test.isTrue(contains(output, '[_computedMethod] = function ('));
   test.isFalse(contains(output, 'createClass'));
 });
 
@@ -78,11 +78,13 @@ Tinytest.add("ecmascript - transpilation - helpers - bind", (test) => {
 });
 
 Tinytest.add("ecmascript - transpilation - helpers - extends", (test) => {
-  const output = transform(`
-  var full = {a:1, ...middle, d:4};
-`);
+  const output = transform("class A extends getBaseClass() {}");
+  test.isTrue(/helpers\/inheritsLoose/.test(output));
+});
 
-  test.isTrue(/helpers\/(builtin\/)?(extends|objectSpread)/.test(output));
+Tinytest.add("ecmascript - transpilation - helpers - objectSpread", (test) => {
+  const output = transform("var full = {a:1, ...middle, d:4};");
+  test.isTrue(/objectSpread/.test(output));
 });
 
 Tinytest.add("ecmascript - transpilation - helpers - objectWithoutProperties", (test) => {
@@ -117,10 +119,4 @@ class Foo {
 `);
 
   test.isTrue(/helpers\/(builtin\/)?createClass/.test(output));
-});
-
-Tinytest.add("ecmascript - transpilation - flow", (test) => {
-  const output = transform(
-    'var foo = function (one: any, two: number, three?): string {};');
-  test.isTrue(contains(output, '(one, two, three)'));
 });

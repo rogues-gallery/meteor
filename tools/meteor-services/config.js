@@ -1,16 +1,15 @@
-import { parse as urlParse } from 'url';
 import {
   pathJoin,
   getCurrentToolsDir,
   getHomeDir,
   inCheckout,
-} from '../fs/files.js';
+} from '../fs/files';
 import tropohouse from '../packaging/tropohouse.js';
 
-// A few functions in the `meteor` tool talk to MDG servers: primarily
-// checking for updates, logging into your Meteor account, and
-// deploying apps to the MDG free hosting sandbox, publishing packages,
-// getting an ssh access to a build farm. These functions need
+// A few functions in the `meteor` tool talk to Meteor Software servers:
+// primarily checking for updates, logging into your Meteor account, and
+// deploying apps to the Meteor Software free hosting sandbox, publishing
+// packages, getting an ssh access to a build farm. These functions need
 // configuration.
 
 // Base URL for Meteor Accounts OAuth services. Endpoints include /authorize
@@ -37,7 +36,7 @@ export function getBuildFarmUrl() {
 }
 
 export function getBuildFarmDomain() {
-  return urlParse(getBuildFarmUrl()).host;
+  return new URL(getBuildFarmUrl()).host;
 }
 
 // URL for the DDP interface to the package server, typically
@@ -48,7 +47,7 @@ export function getPackageServerUrl() {
 }
 
 export function getPackageServerDomain() {
-  return urlParse(getPackageServerUrl()).host;
+  return new URL(getPackageServerUrl()).host;
 }
 
 export function getPackageStatsServerUrl() {
@@ -57,7 +56,7 @@ export function getPackageStatsServerUrl() {
 }
 
 export function getPackageStatsServerDomain() {
-  return urlParse(getPackageStatsServerUrl()).host;
+  return new URL(getPackageStatsServerUrl()).host;
 }
 
 // Note: this is NOT guaranteed to return a distinct prefix for every

@@ -1,13 +1,16 @@
 Package.describe({
   summary: "Tiny testing framework",
-  version: '1.1.0'
+  version: '1.4.1',
+});
+
+Npm.depends({
+  "lodash.isequal": "4.5.0"
 });
 
 Package.onUse(function (api) {
   api.use([
     'ecmascript',
     'ejson',
-    'underscore',
     'random',
     'ddp',
     'mongo',

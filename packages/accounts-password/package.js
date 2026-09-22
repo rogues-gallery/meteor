@@ -5,38 +5,48 @@ Package.describe({
   // 2.2.x in the future. The version was also bumped to 2.0.0 temporarily
   // during the Meteor 1.5.1 release process, so versions 2.0.0-beta.2
   // through -beta.5 and -rc.0 have already been published.
-  version: "1.5.1"
+  version: '3.3.1',
 });
 
-Package.onUse(api => {
-  api.use('npm-bcrypt', 'server');
+Npm.depends({
+  bcrypt: "6.0.0",
+  argon2: "0.44.0",
+  "node-gyp-build": "4.8.4",
+});
 
-  api.use([
-    'accounts-base',
-    'srp',
-    'sha',
-    'ejson',
-    'ddp'
-  ], ['client', 'server']);
+Package.onUse((api) => {
+  api.use(["accounts-base", "sha", "ddp"], ["client", "server"]);
 
   // Export Accounts (etc) to packages using this one.
-  api.imply('accounts-base', ['client', 'server']);
+  api.imply("accounts-base", ["client", "server"]);
 
-  api.use('email', 'server');
-  api.use('random', 'server');
-  api.use('check', 'server');
-  api.use('ecmascript');
+  api.use("email", "server");
+  api.use("random", "server");
+  api.use("check", "server");
+  api.use("ecmascript");
 
-  api.addFiles('email_templates.js', 'server');
-  api.addFiles('password_server.js', 'server');
-  api.addFiles('password_client.js', 'client');
+  api.addFiles("email_templates.js", "server");
+  api.addFiles("password_server.js", "server");
+  api.addFiles("password_client.js", "client");
 });
 
-Package.onTest(api => {
-  api.use(['accounts-password', 'tinytest', 'test-helpers', 'tracker',
-           'accounts-base', 'random', 'email', 'check', 'ddp', 'ecmascript']);
-  api.addFiles('password_tests_setup.js', 'server');
-  api.addFiles('password_tests.js', ['client', 'server']);
-  api.addFiles('email_tests_setup.js', 'server');
-  api.addFiles('email_tests.js', 'client');
+Package.onTest((api) => {
+  api.use([
+    "accounts-password",
+    "sha",
+    "tinytest",
+    "test-helpers",
+    "tracker",
+    "accounts-base",
+    "random",
+    "email",
+    "check",
+    "ddp",
+    "ecmascript"
+  ]);
+  api.addFiles("password_tests_setup.js", "server");
+  api.addFiles("password_tests.js", ["client", "server"]);
+  api.addFiles("email_tests_setup.js", "server");
+  api.addFiles("email_tests.js", "client");
+  api.addFiles("password_argon_tests.js", ["client", "server"]);
 });

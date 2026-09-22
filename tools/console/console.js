@@ -13,7 +13,7 @@
 ///
 /// Sometimes, there is a phrase that shouldn't be split up over multiple
 /// lines (for example, 'meteor update'). When applicable, please use the
-/// following functions (Some of them add aditional formatting, especially when
+/// following functions (Some of them add additional formatting, especially when
 /// pretty-print is turned on):
 ///
 ///    - Console.command: things to enter on the command-line, such as
@@ -49,7 +49,7 @@
 /// (They will change your output in ways that you probably do not want). These
 /// don't auto-linewrap, end in a newline, or take in Console.options.
 ///
-/// Here is are some examples:
+/// Here are some examples:
 ///     Console.rawInfo(JSON.stringify(myData, null, 2));
 ///     Console.rawError(err.stack + "\n");
 ///
@@ -58,7 +58,6 @@
 import { createInterface } from "readline";
 import { format as utilFormat }  from "util";
 import { getRootProgress } from "../utils/buildmessage.js";
-// XXX: Are we happy with chalk (and its sub-dependencies)?
 import chalk from "chalk";
 import { onExit as cleanupOnExit } from "../tool-env/cleanup.js";
 import wordwrap from "wordwrap";
@@ -77,10 +76,6 @@ const CARRIAGE_RETURN = process.platform === 'win32' &&
 
 const FORCE_PRETTY = process.env.METEOR_PRETTY_OUTPUT &&
   process.env.METEOR_PRETTY_OUTPUT != '0';
-
-if (! process.env.METEOR_COLOR) {
-  chalk.enabled = false;
-}
 
 const STATUS_MAX_LENGTH = 40;
 
@@ -101,7 +96,7 @@ const FALLBACK_STATUS = '';
 // WITH RAYS. We intentionally want to NOT use a space-like character: it should
 // be obvious that something has gone wrong if this ever gets printed.
 const SPACE_REPLACEMENT = '\u2600';
-// In Javascript, replace only replaces the first occurance and this is the
+// In Javascript, replace only replaces the first occurrence and this is the
 // proposed alternative.
 const replaceAll = (str, search, replace) => str.split(search).join(replace);
 
@@ -336,7 +331,7 @@ class ProgressDisplayFull {
       this._progressBarRenderer.start = startTime;
     }
 
-    if (!this._renderTimeout && this._lastWrittenTime) {
+    if (!this._rerenderTimeout && this._lastWrittenTime) {
       this._rerenderTimeout = setTimeout(() => {
         this._rerenderTimeout = null;
         this._render()
@@ -447,16 +442,16 @@ class StatusPoller {
     this._stop = false;
   }
 
-  _startPoller() {
+  async _startPoller() {
     if (this._pollPromise) {
       throw new Error("Already started");
     }
 
     this._pollPromise = (async() => {
-      sleepMs(STATUS_INTERVAL_MS);
+      await sleepMs(STATUS_INTERVAL_MS);
       while (! this._stop) {
         this.statusPoll();
-        sleepMs(STATUS_INTERVAL_MS);
+        await sleepMs(STATUS_INTERVAL_MS);
       }
     })();
   }
@@ -509,7 +504,7 @@ class StatusPoller {
 
     this._watching = watching;
 
-    var title = (watching != null ? watching._title : null) || FALLBACK_STATUS;
+    var title = (watching != null ? watching.title : null) || FALLBACK_STATUS;
 
     var progressDisplay = this._console._progressDisplay;
     progressDisplay.updateStatus && progressDisplay.updateStatus(title);
@@ -583,6 +578,7 @@ class Console extends ConsoleBase {
     this._throttledYield = new ThrottledYield();
 
     this.verbose = false;
+    this._simpleDebug = false;
 
     // Legacy helpers
     this.stdout = Object.create(null);
@@ -595,11 +591,16 @@ class Console extends ConsoleBase {
 
     this._logThreshold = LEVEL_CODE_INFO;
     var logspec = process.env.METEOR_LOG;
+
     if (logspec) {
       logspec = logspec.trim().toLowerCase();
-      if (logspec == 'debug') {
+      if (logspec === 'debug') {
         this._logThreshold = LEVEL_CODE_DEBUG;
       }
+    }
+
+    if (process.env.METEOR_SIMPLE_DEBUG) {
+      this._simpleDebug = true;
     }
 
     cleanupOnExit((sig) => {
@@ -622,7 +623,7 @@ class Console extends ConsoleBase {
 
   // Runs f with the progress display visible (ie, with progress display enabled
   // and pretty). Resets both flags to their original values after f runs.
-  withProgressDisplayVisible(f) {
+  async withProgressDisplayVisible(f) {
     var originalPretty = this._pretty;
     var originalProgressDisplayEnabled = this._progressDisplayEnabled;
 
@@ -635,7 +636,7 @@ class Console extends ConsoleBase {
     }
 
     try {
-      return f();
+      return await f();
     } finally {
       // Reset the flags.
       this._pretty = originalPretty;
@@ -682,19 +683,19 @@ class Console extends ConsoleBase {
   // consuming lots of CPU without yielding is especially bad.
   // Other IO/network tasks will stall, and you can't even kill the process!
   //
-  // Within any code that may burn CPU for too long, call `Console.nudge()`.
-  // If it's been a while since your last yield, your Fiber will sleep momentarily.
+  // Within any code that may burn CPU for too long, call `Console.yield()`.
   // It will also update the spinner if there is one and it's been a while.
-  // The caller should be OK with yielding --- it has to be in a Fiber and it can't be
-  // anything that depends for correctness on not yielding.  You can also call nudge(false)
+  // The caller should be OK with yielding --- it can't be
+  // anything that depends for correctness on not yielding.  You can also call Console.nudge()
   // if you just want to update the spinner and not yield, but you should avoid this.
-  nudge(canYield) {
+  nudge() {
     if (this._statusPoller) {
       this._statusPoller.statusPoll();
     }
-    if (canYield === undefined || canYield === true) {
-      this._throttledYield.yield();
-    }
+  }
+  async yield() {
+    this.nudge();
+    await this._throttledYield.yield();
   }
 
   // Initializes and returns a new ConsoleOptions object. Takes in the following
@@ -713,7 +714,7 @@ class Console extends ConsoleBase {
   // Passing in both options will offset the bulletPoint by the indentation,
   // like so:
   //  "  this message is indented by two."
-  //  "  => this mesage indented by two and
+  //  "  => this message indented by two and
   //        and also starts with an arrow."
   //
   options(o) {
@@ -766,6 +767,17 @@ class Console extends ConsoleBase {
 
     var message = this._format(args);
     this._print(LEVEL_DEBUG, message);
+  }
+
+  // Don't use console and so it does not affect tests.
+  // like this.fullBuffer from matcher.
+  simpleDebug(...args) {
+    if (! this._simpleDebug) {
+      return;
+    }
+
+    var message = this._format(args);
+    process.stdout.write( '\n' + message + '\n');
   }
 
   // By default, Console.debug automatically line wraps the output.
@@ -1069,7 +1081,7 @@ class Console extends ConsoleBase {
   //        level with Console.LEVEL_INFO, Console.LEVEL_ERROR, etc.
   //      - ignoreWidth: ignore the width of the terminal, and go over the
   //        character limit instead of trailing off with '...'. Useful for
-  //        printing directories, for examle.
+  //        printing directories, for example.
   //      - indent: indent the entire table by a given number of spaces.
   printTwoColumns(rows, options) {
     options = options || Object.create(null);
@@ -1304,8 +1316,49 @@ class Console extends ConsoleBase {
         this._setProgressDisplay(previousProgressDisplay);
         resolve(line);
       });
-    }).await();
+    });
   }
 }
 
+const yellow  =
+  (text, ...values) =>
+     `\x1b[33m${ String.raw({ raw: text }, ...values) }\x1b[0m`
+const red =
+  (text, ...values) =>
+    `\x1b[31m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const purple =
+  (text, ...values) =>
+    `\x1b[35m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const green =
+  (text, ...values) =>
+    `\x1b[32m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const blue =
+  (text, ...values) =>
+    `\x1b[34m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const cyan =
+  (text, ...values) =>
+    `\x1b[36m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const dim =
+  (text, ...values) =>
+    `\x1b[2m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+const bold =
+  (text, ...values) =>
+    `\x1b[1m${ String.raw({ raw: text }, ...values) }\x1b[0m`;
+
+const link = (url, text) =>
+  `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
+
+const colors = {
+  yellow,
+  red,
+  purple,
+  green,
+  blue,
+  cyan,
+  dim,
+  bold,
+  link,
+};
+
+exports.colors = colors;
 exports.Console = new Console;

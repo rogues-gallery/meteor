@@ -5,18 +5,17 @@ set -u
 
 UNAME=$(uname)
 ARCH=$(uname -m)
-NODE_VERSION=8.15.1
-MONGO_VERSION_64BIT=4.0.6
+NODE_VERSION=24.15.0
+MONGO_VERSION_64BIT=7.0.16
 MONGO_VERSION_32BIT=3.2.22
-NPM_VERSION=6.9.0
+NPM_VERSION=11.12.1
 
-# If we built Node from source on Jenkins, this is the build number.
-NODE_BUILD_NUMBER=
 
 if [ "$UNAME" == "Linux" ] ; then
-    if [ "$ARCH" != "i686" -a "$ARCH" != "x86_64" ] ; then
+    NODE_BUILD_NUMBER=
+    if [[ "$ARCH" != "i686" && "$ARCH" != "x86_64" && "$ARCH" != "aarch64"  ]] ; then
         echo "Unsupported architecture: $ARCH"
-        echo "Meteor only supports i686 and x86_64 for now."
+        echo "Meteor only supports i686, x86_64 and aarch64 for now."
         exit 1
     fi
 
@@ -26,21 +25,26 @@ if [ "$UNAME" == "Linux" ] ; then
         strip --remove-section=.comment --remove-section=.note $1
     }
 elif [ "$UNAME" == "Darwin" ] ; then
-    SYSCTL_64BIT=$(sysctl -n hw.cpu64bit_capable 2>/dev/null || echo 0)
-    if [ "$ARCH" == "i386" -a "1" != "$SYSCTL_64BIT" ] ; then
-        # some older macos returns i386 but can run 64 bit binaries.
-        # Probably should distribute binaries built on these machines,
-        # but it should be OK for users to run.
-        ARCH="x86_64"
+    if [ "$ARCH" != "arm64" ] ; then
+      NODE_BUILD_NUMBER=
+      SYSCTL_64BIT=$(sysctl -n hw.cpu64bit_capable 2>/dev/null || echo 0)
+      if [ "$ARCH" == "i386" -a "1" != "$SYSCTL_64BIT" ] ; then
+          # some older macos returns i386 but can run 64 bit binaries.
+          # Probably should distribute binaries built on these machines,
+          # but it should be OK for users to run.
+          ARCH="x86_64"
+      fi
+
+      if [ "$ARCH" != "x86_64" ] ; then
+          echo "Unsupported architecture: $ARCH"
+          echo "Meteor only supports x86_64 for now."
+          exit 1
+      fi
+    else
+      NODE_BUILD_NUMBER="${NODE_BUILD_NUMBER:="187"}"
     fi
 
-    if [ "$ARCH" != "x86_64" ] ; then
-        echo "Unsupported architecture: $ARCH"
-        echo "Meteor only supports x86_64 for now."
-        exit 1
-    fi
-
-    OS="osx"
+    OS="macos"
 
     # We don't strip on Mac because we don't know a safe command. (Can't strip
     # too much because we do need node to be able to load objects like
@@ -63,13 +67,20 @@ then
     elif [ "$ARCH" == "x86_64" ]
     then
         NODE_TGZ="node-v${NODE_VERSION}-linux-x64.tar.gz"
+    elif [ "$ARCH" == "aarch64" ]
+    then
+        NODE_TGZ="node-v${NODE_VERSION}-linux-arm64.tar.gz"
     else
         echo "Unknown architecture: $UNAME $ARCH"
         exit 1
     fi
 elif [ "$UNAME" == "Darwin" ]
 then
-    NODE_TGZ="node-v${NODE_VERSION}-darwin-x64.tar.gz"
+    if [ "$ARCH" == "arm64" ] ; then
+        NODE_TGZ="node-v${NODE_VERSION}-darwin-arm64.tar.gz"
+    else
+        NODE_TGZ="node-v${NODE_VERSION}-darwin-x64.tar.gz"
+    fi
 else
     echo "Unknown architecture: $UNAME $ARCH"
     exit 1

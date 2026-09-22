@@ -1,5 +1,10 @@
+import { Meteor } from "meteor/meteor";
+import { Tracker } from "meteor/tracker";
+import { HTTP } from "meteor/http";
 import { toSockjsUrl } from "./urls.js";
 import { ClientStream } from "meteor/socket-stream-client";
+import isEqual from "lodash.isequal";
+import once from "lodash.once";
 
 Tinytest.add('stream - status', function(test) {
   // Very basic test. Just see that it runs and returns something. Not a
@@ -7,14 +12,11 @@ Tinytest.add('stream - status', function(test) {
   var status = Meteor.status();
   test.equal(typeof status, 'object');
   test.isTrue(status.status);
-  // Make sure backward-compatiblity names are defined.
-  test.equal(status.retryCount, status.retryCount);
-  test.equal(status.retryTime, status.retryTime);
 });
 
 testAsyncMulti('stream - reconnect', [
   function(test, expect) {
-    var callback = _.once(
+    var callback = once(
       expect(function() {
         var status;
         status = Meteor.status();
@@ -53,17 +55,17 @@ testAsyncMulti('stream - basic disconnect', [
     Tracker.autorun(function() {
       var status = stream.status();
 
-      if (_.last(history) !== status.status) {
+      if (history[history.length -1] !== status.status) {
         history.push(status.status);
 
-        if (_.isEqual(history, ['connecting'])) {
+        if (isEqual(history, ['connecting'])) {
           // do nothing; wait for the next state
-        } else if (_.isEqual(history, ['connecting', 'connected'])) {
+        } else if (isEqual(history, ['connecting', 'connected'])) {
           stream.disconnect();
-        } else if (_.isEqual(history, ['connecting', 'connected', 'offline'])) {
+        } else if (isEqual(history, ['connecting', 'connected', 'offline'])) {
           stream.reconnect();
         } else if (
-          _.isEqual(history, [
+          isEqual(history, [
             'connecting',
             'connected',
             'offline',
@@ -72,7 +74,7 @@ testAsyncMulti('stream - basic disconnect', [
         ) {
           // do nothing; wait for the next state
         } else if (
-          _.isEqual(history, [
+          isEqual(history, [
             'connecting',
             'connected',
             'offline',
@@ -81,6 +83,17 @@ testAsyncMulti('stream - basic disconnect', [
           ])
         ) {
           onTestComplete();
+        } else if (
+          _.isEqual(history, [
+            'connecting',
+            'connected',
+            'offline',
+            'connecting',
+            'connected',
+            'offline',
+          ])
+        ) {
+          // do nothing;
         } else {
           onTestComplete(history);
         }
@@ -106,14 +119,14 @@ testAsyncMulti('stream - disconnect remains offline', [
     Tracker.autorun(function() {
       var status = stream.status();
 
-      if (_.last(history) !== status.status) {
+      if (history[history.length - 1] !== status.status) {
         history.push(status.status);
 
-        if (_.isEqual(history, ['connecting'])) {
+        if (isEqual(history, ['connecting'])) {
           // do nothing; wait for the next status
-        } else if (_.isEqual(history, ['connecting', 'connected'])) {
+        } else if (isEqual(history, ['connecting', 'connected'])) {
           stream.disconnect();
-        } else if (_.isEqual(history, ['connecting', 'connected', 'offline'])) {
+        } else if (isEqual(history, ['connecting', 'connected', 'offline'])) {
           stream._online();
           test.isTrue(status.status === 'offline');
           onTestComplete();
@@ -179,7 +192,7 @@ testAsyncMulti('stream - /websocket is a websocket endpoint', [
     //
     // Verify that /websocket and /websocket/ don't return the main page
     //
-    _.each(['/websocket', '/websocket/'], function(path) {
+    ['/websocket', '/websocket/'].forEach((path) => {
       HTTP.get(
         Meteor._relativeToSiteRootUrl(path),
         expect(function(error, result) {
@@ -207,10 +220,82 @@ testAsyncMulti('stream - /websocket is a websocket endpoint', [
         test.isNull(error);
         pageContent = result.content;
 
-        _.each(['/websockets', '/websockets/'], function(path) {
+        ['/websockets', '/websockets/'].forEach(function(path) {
           HTTP.get(Meteor._relativeToSiteRootUrl(path), wrappedCallback);
         });
       })
     );
   }
 ]);
+// _cleanup runs both when tearing down a live socket and at the top of every
+// (re)connection attempt. Only the former is a disconnection: firing the
+// 'disconnect' event when there was no socket sent consumers a phantom event
+// once per retry cycle (and diverged from the node implementation).
+testAsyncMulti('stream - cleanup without a socket does not fire disconnect', [
+  function(test, expect) {
+    var stream = new ClientStream('/');
+    var disconnectCount = 0;
+    stream.on('disconnect', function() {
+      disconnectCount++;
+    });
+
+    var done = expect(function() {});
+    stream.on(
+      'reset',
+      once(function() {
+        // Connected: a real disconnect closes the socket and fires once.
+        stream.disconnect();
+        test.equal(disconnectCount, 1);
+
+        // A cleanup with no socket must not fire a phantom event.
+        stream._cleanup();
+        test.equal(disconnectCount, 1);
+        done();
+      })
+    );
+  }
+]);
+
+// The window 'online' handler calls reconnect() on any non-offline stream,
+// including permanently failed ones. reconnect() must be a true no-op there:
+// it used to decrement retryCount (compensating for a _retryNow that then
+// refused to run), drifting the counter negative on every online event.
+Tinytest.add(
+  'stream - reconnect on a permanently disconnected stream is a no-op',
+  function(test) {
+    var stream = new ClientStream('/');
+    stream.disconnect({ _permanent: true });
+    test.equal(stream.status().status, 'failed');
+
+    var before = stream.status().retryCount;
+    stream.reconnect();
+    stream.reconnect();
+
+    test.equal(stream.status().retryCount, before);
+    test.equal(stream.status().status, 'failed');
+  }
+);
+
+// The 100s legacy watchdog detects missing SockJS heartbeat frames. Native
+// WebSocket transports have no such frames, so arming it there guarantees a
+// healthy-but-quiet connection (DDP heartbeats disabled) is killed after
+// 100s of silence.
+Tinytest.add(
+  'stream - legacy heartbeat watchdog only arms on the sockjs transport',
+  function(test) {
+    let stream = new ClientStream('/');
+    try {
+      // Simulate a message arriving on a native-WebSocket stream.
+      stream._transport = 'websocket';
+      stream._heartbeat_received();
+      test.isFalse(!!stream.heartbeatTimer);
+
+      // The sockjs transport keeps its watchdog.
+      stream._transport = 'sockjs';
+      stream._heartbeat_received();
+      test.isTrue(!!stream.heartbeatTimer);
+    } finally {
+      stream.disconnect();
+    }
+  }
+);

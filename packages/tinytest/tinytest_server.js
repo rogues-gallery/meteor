@@ -1,4 +1,7 @@
 import { Tinytest } from "./tinytest.js";
+import { check, Match } from "meteor/check";
+import { Random } from "meteor/random";
+import { Meteor } from "meteor/meteor";
 import {
   ServerTestResultsSubscription,
   ServerTestResultsCollection,
@@ -6,11 +9,10 @@ import {
 
 export { Tinytest };
 
-const Fiber = require('fibers');
 const handlesForRun = new Map;
 const reportsForRun = new Map;
 
-Meteor.publish(ServerTestResultsSubscription, function (runId) {
+Meteor.publish(ServerTestResultsSubscription, async function (runId) {
   check(runId, String);
 
   if (! handlesForRun.has(runId)) {
@@ -34,9 +36,16 @@ Meteor.publish(ServerTestResultsSubscription, function (runId) {
 });
 
 Meteor.methods({
-  'tinytest/run'(runId, pathPrefix) {
+  async 'tinytest/run'(runId, pathPrefix) {
     check(runId, String);
     check(pathPrefix, Match.Optional([String]));
+
+    const collections = await MongoInternals.defaultRemoteCollectionDriver().mongo.db.collections();
+
+    for (const collection of collections) {
+      await collection.deleteMany({});
+    }
+
     this.unblock();
 
     reportsForRun.set(runId, Object.create(null));
@@ -55,11 +64,6 @@ Meteor.methods({
     }
 
     function onReport(report) {
-      if (! Fiber.current) {
-        Meteor._debug("Trying to report a test not in a fiber! "+
-                      "You probably forgot to wrap a callback in bindEnvironment.");
-        console.trace();
-      }
       var dummyKey = Random.id();
       addReport(dummyKey, report);
     }
@@ -78,7 +82,7 @@ Meteor.methods({
   'tinytest/clearResults'(runId) {
     check(runId, String);
 
-    handlesForRun.get(runId).forEach(handle => {
+    handlesForRun.get(runId)?.forEach(handle => {
       // XXX this doesn't actually notify the client that it has been
       // unsubscribed.
       handle.stop();

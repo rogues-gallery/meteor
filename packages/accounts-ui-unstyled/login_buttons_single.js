@@ -70,14 +70,17 @@ Template._loginButtonsLoggedOutSingleLoginButton.events({
 
 Template._loginButtonsLoggedOutSingleLoginButton.helpers({
   // not configured and has no config UI
-  cannotConfigure: function () { 
-    return !ServiceConfiguration.configurations.findOne({service: this.name}) && 
+  cannotConfigure: function () {
+    return !ServiceConfiguration.configurations.findOne({service: this.name}) &&
       !Template._configureLoginServiceDialog.templateForService(this.name);
   },
   configured: function () {
     return !!ServiceConfiguration.configurations.findOne({service: this.name});
   },
   capitalizedName: function () {
+    if (this.name === 'twitter') {
+      return 'X/Twitter';
+    }
     if (this.name === 'github')
       // XXX we should allow service packages to set their capitalized name
       return 'GitHub';
@@ -90,6 +93,6 @@ Template._loginButtonsLoggedOutSingleLoginButton.helpers({
 
 // XXX from http://epeli.github.com/underscore.string/lib/underscore.string.js
 const capitalize = input => {
-  str = input == null ? '' : String(input);
+  const str = input == null ? '' : String(input);
   return str.charAt(0).toUpperCase() + str.slice(1);
 };

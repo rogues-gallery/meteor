@@ -1,12 +1,9 @@
-import _ from 'underscore';
 import chalk from 'chalk';
-import child_process from 'child_process';
 
 import { loadIsopackage } from '../tool-env/isopackets.js';
-import runLog from '../runners/run-log.js';
 import { Console } from '../console/console.js';
-import files from '../fs/files.js';
-import { execFileSync, execFileAsync } from '../utils/processes.js';
+import files from '../fs/files';
+import { execFileAsync } from '../utils/processes';
 
 export class CordovaRunTarget {
   get title() {
@@ -29,13 +26,13 @@ export class iOSRunTarget extends CordovaRunTarget {
     // ios-deploy is super buggy, so we just open Xcode and let the user
     // start the app themselves.
     if (this.isDevice) {
-      openXcodeProject(files.pathJoin(cordovaProject.projectRoot,
+      await openXcodeProject(files.pathJoin(cordovaProject.projectRoot,
         'platforms', 'ios'));
     } else {
       await cordovaProject.run(this.platform, this.isDevice, undefined);
 
       // Bring iOS Simulator to front (it is called Simulator in Xcode 7)
-      execFileAsync('osascript', ['-e',
+      await execFileAsync('osascript', ['-e',
 `tell application "System Events"
   set possibleSimulatorNames to {"iOS Simulator", "Simulator"}
   repeat with possibleSimulatorName in possibleSimulatorNames
@@ -48,9 +45,10 @@ end tell`]);
   }
 }
 
-function openXcodeProject(projectDir) {
-  const projectFilename =  files.readdir(projectDir).filter((entry) =>
-    { return entry.match(/\.xcodeproj$/i) })[0];
+async function openXcodeProject(projectDir) {
+  const projectFilename = files.readdir(projectDir).filter((entry) => {
+    return entry.match(/\.xcodeproj$/i);
+  })[0];
 
   if (!projectFilename) {
     printFailure(`Couldn't find your Xcode project in directory \
@@ -58,19 +56,17 @@ function openXcodeProject(projectDir) {
     return;
   }
 
-
   try {
-    execFileSync('open', ['-a', 'Xcode', projectDir]);
+    await execFileAsync("open", ["-a", "Xcode", projectDir]);
 
     Console.info();
     Console.info(
       chalk.green(
         "Your project has been opened in Xcode so that you can run your " +
-        "app on an iOS device. For further instructions, visit this " +
-        "wiki page: ") +
-      Console.url(
-        "https://guide.meteor.com/mobile.html#running-on-ios"
-    ));
+          "app on an iOS device. For further instructions, visit this " +
+          "wiki page: "
+      ) + Console.url("https://guide.meteor.com/cordova.html#running-on-ios")
+    );
     Console.info();
   } catch (error) {
     printFailure(`Failed to open your project in Xcode:
@@ -82,7 +78,7 @@ ${error.message}`);
     Console.error(message);
     Console.error(
       chalk.green("Instructions for running your app on an iOS device: ") +
-      Console.url("https://guide.meteor.com/mobile.html#running-on-ios")
+        Console.url("https://guide.meteor.com/cordova.html#running-on-ios")
     );
     Console.error();
   }
@@ -106,7 +102,7 @@ export class AndroidRunTarget extends CordovaRunTarget {
     let target = this.isDevice ? "-d" : "-e";
 
     // Clear logs
-    execFileAsync('adb', [target, 'logcat', '-c']);
+    await execFileAsync('adb', [target, 'logcat', '-c']);
 
     await cordovaProject.run(this.platform, this.isDevice);
 
@@ -120,21 +116,20 @@ export class AndroidRunTarget extends CordovaRunTarget {
     // Unfortunately, this is intertwined with checking requirements, so the
     // only way to get access to this functionality is to run check_reqs and
     // let it modify process.env
-    var check_reqs_path = files.pathJoin(
-      cordovaProject.projectRoot, 'platforms', this.platform,
-      'cordova', 'lib', 'check_reqs');
-    check_reqs_path = files.convertToOSPath(check_reqs_path);
-    let check_reqs = require(check_reqs_path);
+    // cordova-android 10 and beyond will not include the API files in the project
+    // so we need to load it from the dev bundle
+    const projectPath = files.pathJoin(
+        cordovaProject.projectRoot, 'platforms', this.platform);
+    const check_reqs = require("cordova-android/lib/check_reqs");
     // We can't use check_reqs.run() because that will print the values of
     // JAVA_HOME and ANDROID_HOME to stdout.
-    await Promise.all([check_reqs.check_java(),
-      check_reqs.check_android().then(check_reqs.check_android_target)]);
+    await check_reqs.check_all(projectPath);
   }
 
   async tailLogs(cordovaProject, target) {
-    const { transform } = require("../utils/eachline.js");
+    const { transform } = require("../utils/eachline");
 
-    cordovaProject.runCommands(`tailing logs for ${this.displayName}`, async () => {
+    await cordovaProject.runCommands(`tailing logs for ${this.displayName}`, async () => {
       await this.checkPlatformRequirementsAndSetEnv(cordovaProject);
 
       const logLevel = Console.verbose ? "V" : "I";
@@ -143,7 +138,7 @@ export class AndroidRunTarget extends CordovaRunTarget {
         `CordovaLog:${logLevel}`, `chromium:${logLevel}`,
         `SystemWebViewClient:${logLevel}`, '*:F'];
 
-      const { Log } = loadIsopackage('logging');
+      const { Log } = await loadIsopackage('logging');
 
       const logStream = transform(line => {
         const logEntry = logFromAndroidLogcatLine(Log, line);

@@ -6,10 +6,25 @@
     "test": "meteor test --once --driver-package meteortesting:mocha"
   },
   "dependencies": {
-    "@babel/runtime": "^7.3.4",
-    "meteor-node-stubs": "^0.4.1"
+    "@babel/runtime": "^7.23.5",
+    "@swc/helpers": "^0.5.17",
+    "jquery": "^3.7.1",
+    "meteor-node-stubs": "^1.2.30"
   },
   "devDependencies": {
-    "chai": "^4.1.2"
+    "@meteorjs/rspack": "^2.2.0",
+    "@rsdoctor/rspack-plugin": "^1.5.7",
+    "@rspack/cli": "^1.7.1",
+    "@rspack/core": "^1.7.1",
+    "chai": "^4.2.0",
+    "sass-embedded": "^1.89.0",
+    "sass-loader": "^16.0.5"
+  },
+  "meteor": {
+    "mainModule": {
+      "client": "client/main.js",
+      "server": "server/main.js"
+    },
+    "modern": true
   }
 }

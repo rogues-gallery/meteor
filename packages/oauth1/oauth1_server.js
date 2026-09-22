@@ -1,32 +1,22 @@
-import url from 'url';
 import { OAuth1Binding } from './oauth1_binding';
 
 OAuth._queryParamsWithAuthTokenUrl = (authUrl, oauthBinding, params = {}, whitelistedQueryParams = []) => {
-  const redirectUrlObj = url.parse(authUrl, true);
+  const redirectUrl = new URL(authUrl);
 
-  Object.assign(
-    redirectUrlObj.query,
-    whitelistedQueryParams.reduce((prev, param) => 
-      params.query[param] ? { ...prev, param: params.query[param] } : prev,
-      {}
-    ),
-    {
-      oauth_token: oauthBinding.requestToken,
+  whitelistedQueryParams.forEach(param => {
+    if (params.query && params.query[param]) {
+      redirectUrl.searchParams.set(param, params.query[param]);
     }
-  );
+  });
 
-  // Clear the `search` so it is rebuilt by Node's `url` from the `query` above.
-  // Using previous versions of the Node `url` module, this was just set to ""
-  // However, Node 6 docs seem to indicate that this should be `undefined`.
-  delete redirectUrlObj.search;
+  redirectUrl.searchParams.set('oauth_token', oauthBinding.requestToken);
 
-  // Reconstruct the URL back with provided query parameters merged with oauth_token
-  return url.format(redirectUrlObj);
+  return redirectUrl.toString();
 };
 
 // connect middleware
-OAuth._requestHandlers['1'] = (service, query, res) => {
-  const config = ServiceConfiguration.configurations.findOne({service: service.serviceName});
+OAuth._requestHandlers['1'] = async (service, query, res) => {
+  const config = await ServiceConfiguration.configurations.findOneAsync({service: service.serviceName});
   if (! config) {
     throw new ServiceConfiguration.ConfigError(service.serviceName);
   }
@@ -45,10 +35,10 @@ OAuth._requestHandlers['1'] = (service, query, res) => {
     });
 
     // Get a request token to start auth process
-    oauthBinding.prepareRequestToken(callbackUrl);
+    await oauthBinding.prepareRequestToken(callbackUrl);
 
     // Keep track of request token so we can verify it on the next step
-    OAuth._storeRequestToken(
+    await OAuth._storeRequestToken(
       OAuth._credentialTokenFromQuery(query),
       oauthBinding.requestToken,
       oauthBinding.requestTokenSecret);
@@ -76,7 +66,7 @@ OAuth._requestHandlers['1'] = (service, query, res) => {
     // and close the window to allow the login handler to proceed
 
     // Get the user's request token so we can verify it and clear it
-    const requestTokenInfo = OAuth._retrieveRequestToken(
+    const requestTokenInfo = await OAuth._retrieveRequestToken(
       OAuth._credentialTokenFromQuery(query));
 
     if (! requestTokenInfo) {
@@ -91,10 +81,10 @@ OAuth._requestHandlers['1'] = (service, query, res) => {
       // subsequent call to the `login` method will be immediate.
 
       // Get the access token for signing requests
-      oauthBinding.prepareAccessToken(query, requestTokenInfo.requestTokenSecret);
+      await oauthBinding.prepareAccessToken(query, requestTokenInfo.requestTokenSecret);
 
       // Run service-specific handler.
-      const oauthResult = service.handleOauthRequest(
+      const oauthResult = await service.handleOauthRequest(
         oauthBinding, { query: query });
 
       const credentialToken = OAuth._credentialTokenFromQuery(query);
@@ -102,7 +92,7 @@ OAuth._requestHandlers['1'] = (service, query, res) => {
 
       // Store the login result so it can be retrieved in another
       // browser tab by the result handler
-      OAuth._storePendingCredential(credentialToken, {
+      await OAuth._storePendingCredential(credentialToken, {
         serviceName: service.serviceName,
         serviceData: oauthResult.serviceData,
         options: oauthResult.options
@@ -111,6 +101,6 @@ OAuth._requestHandlers['1'] = (service, query, res) => {
 
     // Either close the window, redirect, or render nothing
     // if all else fails
-    OAuth._renderOauthResults(res, query, credentialSecret);
+    await OAuth._renderOauthResults(res, query, credentialSecret);
   }
 };

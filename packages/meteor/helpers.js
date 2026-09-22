@@ -1,6 +1,3 @@
-if (Meteor.isServer)
-  var Future = Npm.require('fibers/future');
-
 if (typeof __meteor_runtime_config__ === 'object' &&
     __meteor_runtime_config__.meteorRelease) {
   /**
@@ -71,6 +68,49 @@ Meteor._delete = function (obj /*, arguments */) {
   }
 };
 
+
+/**
+ * @memberOf Meteor
+ * @locus Anywhere
+ * @summary Takes a function that has a callback argument as the last one and promissify it.
+ * One option would be to use node utils.promisify, but it won't work on the browser.
+ * @param {Function} fn
+ * @param {Object} [context]
+ * @param {Boolean} [errorFirst] - If the callback follows the errorFirst style, default to true
+ * @returns {function(...[*]): Promise<unknown>}
+ */
+Meteor.promisify = function (fn, context, errorFirst) {
+  if (errorFirst === undefined) {
+    errorFirst = true;
+  }
+
+  return function () {
+    var self = this;
+    var filteredArgs = Array.prototype.slice.call(arguments)
+      .filter(function (i) { return i !== undefined; });
+
+    return new Promise(function (resolve, reject) {
+      var callback = Meteor.bindEnvironment(function (error, result) {
+        var _error = error, _result = result;
+        if (!errorFirst) {
+          _error = result;
+          _result = error;
+        }
+
+        if (_error) {
+          return reject(_error);
+        }
+
+        resolve(_result);
+      });
+
+      filteredArgs.push(callback);
+
+      return fn.apply(context || self, filteredArgs);
+    });
+  };
+};
+
 // wrapAsync can wrap any function that takes some number of arguments that
 // can't be undefined, followed by some optional arguments, where the callback
 // is the last optional argument.
@@ -81,7 +121,12 @@ Meteor._delete = function (obj /*, arguments */) {
 
 /**
  * @memberOf Meteor
- * @summary Wrap a function that takes a callback function as its final parameter. The signature of the callback of the wrapped function should be `function(error, result){}`. On the server, the wrapped function can be used either synchronously (without passing a callback) or asynchronously (when a callback is passed). On the client, a callback is always required; errors will be logged if there is no callback. If a callback is provided, the environment captured when the original function was called will be restored in the callback.
+ * @summary Wrap a function that takes a callback function as its final parameter.
+ * The signature of the callback of the wrapped function should be `function(error, result){}`.
+ * On the server, the wrapped function can be used either synchronously (without passing a callback) or asynchronously
+ * (when a callback is passed). On the client, a callback is always required; errors will be logged if there is no callback.
+ * If a callback is provided, the environment captured when the original function was called will be restored in the callback.
+ * The parameters of the wrapped function must not contain any optional parameters or be undefined, as the callback function is expected to be the final, non-undefined parameter.
  * @locus Anywhere
  * @param {Function} func A function that takes a callback as its final parameter
  * @param {Object} [context] Optional `this` object against which the original function will be invoked
@@ -104,19 +149,17 @@ Meteor.wrapAsync = function (fn, context) {
     }
 
     if (! callback) {
-      if (Meteor.isClient) {
-        callback = logErr;
-      } else {
-        var fut = new Future();
-        callback = fut.resolver();
-      }
+      callback = logErr;
       ++i; // Insert the callback just after arg.
     }
 
     newArgs[i] = Meteor.bindEnvironment(callback);
-    var result = fn.apply(self, newArgs);
-    return fut ? fut.wait() : result;
+    return fn.apply(self, newArgs);
   };
+};
+
+Meteor.wrapFn = function (fn) {
+  return fn;
 };
 
 // Sets child's prototype to a new object whose prototype is parent's

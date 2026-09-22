@@ -2,7 +2,7 @@ const fs = Plugin.fs;
 const path = Plugin.path;
 const createHash = Npm.require('crypto').createHash;
 const assert = Npm.require('assert');
-const LRU = Npm.require('lru-cache');
+const LRUCache = Npm.require('lru-cache');
 
 // Base class for CachingCompiler and MultiFileCachingCompiler.
 CachingCompilerBase = class CachingCompilerBase {
@@ -121,10 +121,10 @@ CachingCompilerBase = class CachingCompilerBase {
 
   // Called by the compiler plugins system after all linking and lazy
   // compilation has finished.
-  afterLink() {
-    this._afterLinkCallbacks.splice(0).forEach(callback => {
-      callback();
-    });
+  async afterLink() {
+    for (const callback of this._afterLinkCallbacks.splice(0)) {
+      await callback();
+    }
   }
 
   // Borrowed from another MIT-licensed project that benjamn wrote:
@@ -171,27 +171,16 @@ CachingCompilerBase = class CachingCompilerBase {
     return hash.digest('hex');
   }
 
-  // We want to write the file atomically. But we also don't want to block
-  // processing on the file write.
-  _writeFileAsync(filename, contents) {
+  // Write the file atomically.
+  _writeFile(filename, contents) {
     const tempFilename = filename + '.tmp.' + Random.id();
-    if (this._cacheDebugEnabled) {
-      // Write cache file synchronously when cache debugging enabled.
-      try {
-        fs.writeFileSync(tempFilename, contents);
-        fs.renameSync(tempFilename, filename);
-      } catch (e) {
-        // ignore errors, it's just a cache
-      }
-    } else {
-      fs.writeFile(tempFilename, contents, writeError => {
-        if (writeError) return;
-        try {
-          fs.renameSync(tempFilename, filename);
-        } catch (renameError) {
-          // ignore errors, it's just a cache
-        }
-      });
+
+    try {
+      fs.writeFileSync(tempFilename, contents);
+      fs.renameSync(tempFilename, filename);
+    } catch (e) {
+      // ignore errors, it's just a cache
+      this._cacheDebug(e);
     }
   }
 
@@ -262,7 +251,7 @@ CachingCompiler = class CachingCompiler extends CachingCompilerBase {
     super({compilerName, defaultCacheSize, maxParallelism});
 
     // Maps from a hashed cache key to a compileResult.
-    this._cache = new LRU({
+    this._cache = new LRUCache({
       max: this._cacheSize,
       length: (value) => this.compileResultSize(value),
     });
@@ -295,12 +284,12 @@ CachingCompiler = class CachingCompiler extends CachingCompilerBase {
     const cacheMisses = [];
     const arches = this._cacheDebugEnabled && Object.create(null);
 
-    inputFiles.forEach(inputFile => {
+    for (const inputFile of inputFiles) {
       if (arches) {
         arches[inputFile.getArch()] = 1;
       }
 
-      const getResult = () => {
+      const getResult = async () => {
         const cacheKey = this._deepHash(this.getCacheKey(inputFile));
         let compileResult = this._cache.get(cacheKey);
 
@@ -313,7 +302,7 @@ CachingCompiler = class CachingCompiler extends CachingCompilerBase {
 
         if (! compileResult) {
           cacheMisses.push(inputFile.getDisplayPath());
-          compileResult = Promise.await(this.compileOneFile(inputFile));
+          compileResult = await this.compileOneFile(inputFile);
 
           if (! compileResult) {
             // compileOneFile should have called inputFile.error.
@@ -331,14 +320,14 @@ CachingCompiler = class CachingCompiler extends CachingCompilerBase {
 
       if (this.compileOneFileLater &&
           inputFile.supportsLazyCompilation) {
-        this.compileOneFileLater(inputFile, getResult);
+        await this.compileOneFileLater(inputFile, getResult);
       } else {
-        const result = getResult();
+        const result = await getResult();
         if (result) {
-          this.addCompileResult(inputFile, result);
+          await this.addCompileResult(inputFile, result);
         }
       }
-    });
+    }
 
     if (this._cacheDebugEnabled) {
       this._afterLinkCallbacks.push(() => {
@@ -384,7 +373,7 @@ CachingCompiler = class CachingCompiler extends CachingCompilerBase {
       return;
     const cacheFilename = this._cacheFilename(cacheKey);
     const cacheContents = this.stringifyCompileResult(compileResult);
-    this._writeFileAsync(cacheFilename, cacheContents);
+    this._writeFile(cacheFilename, cacheContents);
   }
 
   // Returns null if the file does not exist or can't be parsed; otherwise

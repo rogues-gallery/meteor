@@ -20,7 +20,7 @@ Accounts.emailTemplates.headers = {
   'My-Custom-Header' : 'Cool'
 };
 
-EmailTest.hookSend(options => {
+Email.hookSend(options => {
   const { to } = options;
   if (!to || !to.toUpperCase().includes('INTERCEPT')) {
     return true; // go ahead and send
@@ -33,24 +33,29 @@ EmailTest.hookSend(options => {
   }
 });
 
-Meteor.methods({
-  getInterceptedEmails: email => {
-    check(email, String);
-    return interceptedEmails[email];
-  },
+Meteor.methods(
+  {
+    getInterceptedEmails:
+      email => {
+        check(email, String);
+        return interceptedEmails[email];
+      },
 
-  addEmailForTestAndVerify: email => {
-    check(email, String);
-    Meteor.users.update(
-      {_id: Accounts.userId()},
-      {$push: {emails: {address: email, verified: false}}});
-    Accounts.sendVerificationEmail(Accounts.userId(), email);
-  },
+    addEmailForTestAndVerify:
+      async email => {
+        check(email, String);
+        await Meteor.users.updateAsync(
+          { _id: Accounts.userId() },
+          { $push: { emails: { address: email, verified: false } } });
+        await Accounts.sendVerificationEmail(Accounts.userId(), email);
+      },
 
-  createUserOnServer: email => {
-    check(email, String);
-    const userId = Accounts.createUser({ email });
-    Accounts.sendEnrollmentEmail(userId);
-    return Meteor.users.findOne(userId);
+    createUserOnServer:
+      async email => {
+        check(email, String);
+        const userId = await Accounts.createUser({ email });
+        await Accounts.sendEnrollmentEmail(userId);
+        return Meteor.users.findOneAsync(userId);
+      }
   }
-});
+);

@@ -1,32 +1,30 @@
-import React, { Component } from 'react';
-import { withTracker } from 'meteor/react-meteor-data';
-import Links from '../api/links';
+import { useFind, useSubscribe } from "meteor/react-meteor-data";
+import { LinksCollection } from "../api/links";
 
-class Info extends Component {
-  render() {
-    const links = this.props.links.map(
-      link => this.makeLink(link)
-    );
+export const Info = () => {
+  const isLoading = useSubscribe("links");
+  const links = useFind(() => LinksCollection.find());
 
-    return (
-      <div>
-        <h2>Learn Meteor!</h2>
-        <ul>{ links }</ul>
-      </div>
-    );
+  if (isLoading()) {
+    return <div>Loading...</div>;
   }
 
-  makeLink(link) {
-    return (
-      <li key={link._id}>
-        <a href={link.url} target="_blank">{link.title}</a>
-      </li>
-    );
-  }
-}
-
-export default InfoContainer = withTracker(() => {
-  return {
-    links: Links.find().fetch(),
-  };
-})(Info);
+  return (
+    <section>
+      <h2 className="section-title">Learn Meteor!</h2>
+      <ul className="resources-grid">
+        {links.map((link) => (
+          <li className="section" key={link._id}>
+            <a href={link.url} className="resource-link" target="_blank">
+              <div className="card resource-card">
+                <div className="resource-content">
+                  <span className="resource-title">{link.title}</span>
+                </div>
+              </div>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+};

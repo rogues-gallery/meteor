@@ -1,23 +1,17 @@
 Package.describe({
   summary: "Google OAuth flow",
-  version: "1.2.6",
+  version: '1.4.5',
 });
 
-const cordovaPluginGooglePlusURL =
-  // This revision is from the "update-entitlements-plist-files" branch.
-  // This logic can be reverted when/if this PR is merged:
-  // https://github.com/EddyVerbruggen/cordova-plugin-googleplus/pull/366
-  "https://github.com/meteor/cordova-plugin-googleplus.git#3095abe327e710ab04059ae9d3521bd4037c5a37";
-
 Cordova.depends({
-  "cordova-plugin-googleplus": cordovaPluginGooglePlusURL
+  "cordova-plugin-googleplus": "8.4.0",
 });
 
 Package.onUse(api => {
   api.use("ecmascript");
   api.use('oauth2', ['client', 'server']);
   api.use('oauth', ['client', 'server']);
-  api.use('http', ['server']);
+  api.use('fetch', ['server']);
   api.use('service-configuration');
   api.use('random', 'client');
 
@@ -28,4 +22,10 @@ Package.onUse(api => {
   api.mainModule('namespace.js');
 
   api.export('Google');
+});
+
+Package.onTest(function(api) {
+  api.use('google-oauth');
+  api.use(['tinytest', 'ecmascript', 'test-helpers', 'oauth', 'oauth2', 'service-configuration']);
+  api.addFiles('google-oauth_tests.js');
 });

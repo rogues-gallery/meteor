@@ -1,10 +1,11 @@
 "use strict";
 
 import _ from "underscore";
-import files from "../fs/files.js";
-import { WatchSet, sha1 } from "../fs/watch.js";
+import files from "../fs/files";
+import { WatchSet, sha1 } from "../fs/watch";
 import { NodeModulesDirectory } from "./bundler.js";
-import * as archinfo from "../utils/archinfo.js";
+import * as archinfo from "../utils/archinfo";
+import { SourceResource } from './compiler';
 
 function rejectBadPath(p) {
   if (p.indexOf("..") >= 0) {
@@ -92,7 +93,7 @@ export class Unibuild {
     });
   }
 
-  static fromJSON(unibuildJson, {
+  static async fromJSON(unibuildJson, {
     isopack,
     // At some point we stopped writing 'kind's to the metadata file, so
     // default to main.
@@ -152,7 +153,10 @@ export class Unibuild {
           usesDefaultSourceProcessor: true,
           legacyPrelink: {
             packageVariables: unibuildJson.packageVariables || []
-          }
+          },
+          // Only published packages still use prelink resources,
+          // so there is no need to mark this file to be watched
+          _dataUsed: false
         };
 
         if (resource.sourceMap) {
@@ -164,8 +168,7 @@ export class Unibuild {
         resources.push(prelinkResource);
 
       } else if (resource.type === "source") {
-        resources.push({
-          type: "source",
+        resources.push(new SourceResource({
           extension: resource.extension,
           usesDefaultSourceProcessor:
           !! resource.usesDefaultSourceProcessor,
@@ -173,10 +176,8 @@ export class Unibuild {
           path: resource.path,
           hash: resource.hash,
           fileOptions: resource.fileOptions
-        });
-
-      } else if (_.contains(["head", "body", "css", "js", "asset"],
-                            resource.type)) {
+        }));
+      } else if (["head", "body", "css", "js", "asset"].includes(resource.type)) {
         resources.push({
           type: resource.type,
           data: data,
@@ -208,7 +209,7 @@ export class Unibuild {
     }
 
     const nodeModulesDirectories =
-      NodeModulesDirectory.readDirsFromJSON(unibuildJson.node_modules, {
+      await NodeModulesDirectory.readDirsFromJSON(unibuildJson.node_modules, {
         packageName: isopack.name,
         sourceRoot: unibuildBasePath,
         // Rebuild binary npm packages if unibuild arch matches host arch.
@@ -227,7 +228,7 @@ export class Unibuild {
     });
   }
 
-  toJSON({
+  async toJSON({
     builder,
     unibuildDir,
     usesModules,
@@ -251,14 +252,14 @@ export class Unibuild {
 
     // Figure out where the npm dependencies go.
     let node_modules = {};
-    _.each(unibuild.nodeModulesDirectories, nmd => {
+    for (const nmd of Object.values(unibuild.nodeModulesDirectories)) {
       const bundlePath = _.has(npmDirsToCopy, nmd.sourcePath)
-      // We already have this npm directory from another unibuild.
-        ? npmDirsToCopy[nmd.sourcePath]
-        : npmDirsToCopy[nmd.sourcePath] =
-            nmd.getPreferredBundlePath("isopack");
-      node_modules[bundlePath] = nmd.toJSON();
-    });
+          // We already have this npm directory from another unibuild.
+          ? npmDirsToCopy[nmd.sourcePath]
+          : npmDirsToCopy[nmd.sourcePath] =
+              nmd.getPreferredBundlePath("isopack");
+      node_modules[bundlePath] = await nmd.toJSON();
+    }
 
     const preferredPaths = Object.keys(node_modules);
     if (preferredPaths.length === 1) {
@@ -278,7 +279,7 @@ export class Unibuild {
     const offset = { head: 0, body: 0 };
 
     _.each(unibuild.resources, function (resource) {
-      if (_.contains(["head", "body"], resource.type)) {
+      if (["head", "body"].includes(resource.type)) {
         if (concat[resource.type].length) {
           concat[resource.type].push(Buffer.from("\n", "utf8"));
           offset[resource.type]++;
@@ -306,52 +307,59 @@ export class Unibuild {
       }
     });
 
-    _.each(concat, function (parts, type) {
+    for (const [type, parts] of Object.entries(concat)) {
       if (parts.length) {
-        builder.write(files.pathJoin(unibuildDir, type), {
+        await builder.write(files.pathJoin(unibuildDir, type), {
           data: Buffer.concat(concat[type], offset[type])
         });
       }
-    });
+    }
 
     // Output other resources each to their own file
-    _.each(unibuild.resources, function (resource) {
-      if (_.contains(["head", "body"], resource.type)) {
+    for (const resource of unibuild.resources) {
+      if (["head", "body"].includes(resource.type)) {
         // already did this one
-        return;
+        continue;
+      }
+
+      let data;
+      if (resource.type === 'source') {
+        data = resource.legacyPrelink ? resource.data : resource._data;
+      } else {
+        data = resource.data;
       }
 
       const generatedFilename =
-        builder.writeToGeneratedFilename(
-          files.pathJoin(
-            unibuildDir,
-            resource.servePath || resource.path,
-          ),
-          { data: resource.data }
-        );
+          await builder.writeToGeneratedFilename(
+              files.pathJoin(
+                  unibuildDir,
+                  resource.servePath || resource.path,
+              ),
+              { data }
+          );
 
       if (! usesModules &&
           resource.fileOptions &&
           resource.fileOptions.lazy) {
         // Omit lazy resources from the unibuild JSON file, but only after
         // they are copied into the bundle (immediately above).
-        return;
+        continue;
       }
 
       unibuildJson.resources.push({
         type: resource.type,
         extension: resource.extension,
         file: generatedFilename,
-        length: resource.data.length,
+        length: data.length,
         offset: 0,
         usesDefaultSourceProcessor:
-          resource.usesDefaultSourceProcessor || undefined,
+            resource.usesDefaultSourceProcessor || undefined,
         servePath: resource.servePath || undefined,
         path: resource.path || undefined,
-        hash: resource.hash || undefined,
+        hash: resource._hash || resource.hash || undefined,
         fileOptions: resource.fileOptions || undefined
       });
-    });
+    }
 
     return unibuildJson;
   }

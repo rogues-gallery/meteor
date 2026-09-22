@@ -1,17 +1,17 @@
 // This file contains an old definition of CompileStep, an object that is passed
 // to the package-provided file handler.
 // Since then, the newer API called "Batch Plugins" have replaced it but we keep
-// the functionality for the backwards-compitability.
+// the functionality for the backwards-compatibility.
 // @deprecated
 // XXX COMPAT WITH 1.1.0.2
 
 var _ = require('underscore');
 
-var archinfo = require('../utils/archinfo.js');
+var archinfo = require('../utils/archinfo');
 var buildmessage = require('../utils/buildmessage.js');
-var files = require('../fs/files.js');
+var files = require('../fs/files');
 var colonConverter = require('../utils/colon-converter.js');
-var watch = require('../fs/watch.js');
+var watch = require('../fs/watch');
 
 var convertSourceMapPaths = function (sourcemap, f) {
   if (! sourcemap) {
